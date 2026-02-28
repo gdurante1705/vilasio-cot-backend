@@ -189,6 +189,25 @@ def cot_symbol(symbol):
     entries = entries[-weeks:] if len(entries) > weeks else entries
     return jsonify({'symbol': symbol, 'weeks': len(entries), 'data': entries})
 
+@app.route('/debug/markets')
+def debug_markets():
+    """List all unique market names in CFTC CSV"""
+    year = datetime.datetime.now().year
+    url = CFTC_BASE.format(year=year)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/1.0'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            zip_data = resp.read()
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            csv_name = [n for n in zf.namelist() if n.endswith('.txt') or n.endswith('.csv')][0]
+            with zf.open(csv_name) as f:
+                content = f.read().decode('utf-8', errors='replace')
+        reader = csv.DictReader(io.StringIO(content))
+        markets = sorted(set(row.get('Market_and_Exchange_Names','').strip() for row in reader))
+        return jsonify({'count': len(markets), 'markets': markets})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
 @app.route('/debug/columns')
 def debug_columns():
     year = datetime.datetime.now().year
