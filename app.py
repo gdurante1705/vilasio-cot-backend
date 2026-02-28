@@ -198,3 +198,27 @@ def cot_symbol(symbol):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
+@app.route('/debug/columns')
+def debug_columns():
+    """Return actual column names from CFTC CSV"""
+    import urllib.request, zipfile, io, csv
+    year = datetime.datetime.now().year
+    url = CFTC_BASE.format(year=year)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/1.0'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            zip_data = resp.read()
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            csv_name = [n for n in zf.namelist() if n.endswith('.txt') or n.endswith('.csv')][0]
+            with zf.open(csv_name) as f:
+                content = f.read().decode('utf-8', errors='replace')
+        reader = csv.DictReader(io.StringIO(content))
+        row = next(reader)
+        return jsonify({
+            'columns': list(row.keys()),
+            'sample_market': row.get('Market_and_Exchange_Names',''),
+            'sample_row': {k:v for k,v in list(row.items())[:30]}
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
