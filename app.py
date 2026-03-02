@@ -1,12 +1,7 @@
 """
-Vilasio COT Backend v3.0
-Uses CFTC Socrata JSON API — no CSV header issues.
-
-Data sources:
-  - Legacy Futures Only API (6dca-aqww): NonComm/Comm for ALL markets
-    This matches Tradingster's data exactly.
-
-API docs: https://dev.socrata.com/foundry/publicreporting.cftc.gov/6dca-aqww
+Vilasio COT Backend v3.1
+Uses CFTC Socrata JSON API — Legacy Futures Only (6dca-aqww).
+Exact contract_market_name matching — matches Tradingster data.
 """
 
 import os
@@ -27,41 +22,38 @@ def add_cors(response):
     return response
 
 
-# ─── CFTC Socrata API ──────────────────────────────────
-# Legacy Futures Only — has NonComm/Comm for ALL markets (matches Tradingster)
+# Legacy Futures Only — NonComm/Comm for all markets (matches Tradingster)
 LEGACY_API = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"
-
-# Page size — Socrata default limit is 1000, max is 50000
 PAGE_SIZE = 50000
 
 
 # ─── MARKET CONFIG ──────────────────────────────────────
-# contract_market_name is the exact name used in the CFTC API
+# contract_market_name: exact name from CFTC API (verified Feb 2026)
 MARKETS = {
     "ES": {"name": "E-Mini S&P 500",    "exchange": "Chicago Mercantile Exchange", "cat": "Equity",
-           "cftc_search": "S&P 500"},
+           "cftc_name": "S&P 500 Consolidated"},
     "NQ": {"name": "E-Mini Nasdaq 100", "exchange": "Chicago Mercantile Exchange", "cat": "Equity",
-           "cftc_search": "NASDAQ-100"},
+           "cftc_name": "NASDAQ-100 Consolidated"},
     "GC": {"name": "Gold",              "exchange": "Commodity Exchange Inc.",      "cat": "Metals",
-           "cftc_search": "GOLD"},
+           "cftc_name": "GOLD"},
     "CL": {"name": "Crude Oil WTI",     "exchange": "New York Mercantile Exchange","cat": "Energy",
-           "cftc_search": "CRUDE OIL, LIGHT SWEET"},
+           "cftc_name": "WTI-PHYSICAL"},
     "SI": {"name": "Silver",            "exchange": "Commodity Exchange Inc.",      "cat": "Metals",
-           "cftc_search": "SILVER"},
+           "cftc_name": "SILVER"},
     "ZB": {"name": "30-Year T-Bond",    "exchange": "Chicago Board of Trade",      "cat": "Rates",
-           "cftc_search": "U.S. TREASURY BONDS"},
+           "cftc_name": "UST BOND"},
     "6E": {"name": "Euro FX",           "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "cftc_search": "EURO FX"},
+           "cftc_name": "EURO FX"},
     "6B": {"name": "British Pound",     "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "cftc_search": "BRITISH POUND"},
+           "cftc_name": "BRITISH POUND"},
     "6J": {"name": "Japanese Yen",      "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "cftc_search": "JAPANESE YEN"},
+           "cftc_name": "JAPANESE YEN"},
     "NG": {"name": "Natural Gas",       "exchange": "New York Mercantile Exchange","cat": "Energy",
-           "cftc_search": "NATURAL GAS"},
+           "cftc_name": "NAT GAS NYME"},
     "ZC": {"name": "Corn",              "exchange": "Chicago Board of Trade",      "cat": "Agri",
-           "cftc_search": "CORN"},
+           "cftc_name": "CORN"},
     "ZW": {"name": "Wheat",             "exchange": "Chicago Board of Trade",      "cat": "Agri",
-           "cftc_search": "WHEAT-SRW"},
+           "cftc_name": "WHEAT-SRW"},
 }
 
 
@@ -72,19 +64,17 @@ def safe_int(val):
         return 0
 
 
-# ─── CACHE ──────────────────────────────────────────────
 _cache = {}
 _cache_time = {}
 CACHE_TTL = 3600 * 6
 
 
 def fetch_json(url, params=None):
-    """Fetch JSON from CFTC Socrata API."""
     if params:
         url = url + '?' + urllib.parse.urlencode(params)
-    print(f"[COT] Fetching: {url[:120]}...")
+    print(f"[COT] Fetching: {url[:150]}...")
     req = urllib.request.Request(url, headers={
-        'User-Agent': 'Vilasio/3.0',
+        'User-Agent': 'Vilasio/3.1',
         'Accept': 'application/json',
     })
     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -92,51 +82,37 @@ def fetch_json(url, params=None):
 
 
 def fetch_market_data(symbol):
-    """
-    Fetch Legacy COT data for a single market from CFTC Socrata API.
-    Returns list of entries sorted by date.
-    """
+    """Fetch Legacy COT data for a single market using exact contract_market_name."""
     cfg = MARKETS[symbol]
-    search_term = cfg["cftc_search"]
+    cftc_name = cfg["cftc_name"]
 
-    # Calculate date range: 2.5 years back for Z-Score
-    end_date = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=365 * 3)
+    # 3 years back for Z-Score
+    start_date = (datetime.date.today() - datetime.timedelta(days=365 * 3)).isoformat()
 
-    # SoQL query
     params = {
-        '$where': f"market_and_exchange_names like '%{search_term}%' "
-                  f"AND report_date_as_yyyy_mm_dd >= '{start_date.isoformat()}'",
+        '$where': f"contract_market_name='{cftc_name}' "
+                  f"AND report_date_as_yyyy_mm_dd >= '{start_date}'",
         '$order': 'report_date_as_yyyy_mm_dd ASC',
         '$limit': str(PAGE_SIZE),
     }
 
     rows = fetch_json(LEGACY_API, params)
-    print(f"[COT] {symbol} ({search_term}): got {len(rows)} rows from API")
+    print(f"[COT] {symbol} ('{cftc_name}'): {len(rows)} rows")
 
     if not rows:
         return []
 
-    # If multiple contract names match, pick the one with highest OI (consolidated)
-    # Group by date, keep the row with highest open_interest_all per date
-    by_date = {}
+    entries = []
+    seen_dates = set()
     for row in rows:
         date_str = row.get('report_date_as_yyyy_mm_dd', '')
         if not date_str:
             continue
-        date_iso = date_str[:10]  # Already YYYY-MM-DD format
-        oi = safe_int(row.get('open_interest_all', 0))
+        date_iso = date_str[:10]
+        if date_iso in seen_dates:
+            continue
+        seen_dates.add(date_iso)
 
-        if date_iso not in by_date or oi > by_date[date_iso]['_oi']:
-            by_date[date_iso] = {
-                '_oi': oi,
-                '_row': row,
-                '_market_name': row.get('market_and_exchange_names', ''),
-            }
-
-    entries = []
-    for date_iso in sorted(by_date.keys()):
-        row = by_date[date_iso]['_row']
         bp_long  = safe_int(row.get('noncomm_positions_long_all', 0))
         bp_short = safe_int(row.get('noncomm_positions_short_all', 0))
         dl_long  = safe_int(row.get('comm_positions_long_all', 0))
@@ -157,18 +133,17 @@ def fetch_market_data(symbol):
             'oi':      oi,
         })
 
-    if entries:
-        mkt_name = by_date[entries[-1]['date']]['_market_name']
-        last = entries[-1]
-        print(f"  {symbol}: matched '{mkt_name}', {len(entries)} weeks, "
-              f"{entries[0]['date']} -> {last['date']}, "
-              f"bpNet={last['bpNet']:+,}, dlNet={last['dlNet']:+,}, oi={last['oi']:,}")
+    entries.sort(key=lambda x: x['date'])
 
+    if entries:
+        last = entries[-1]
+        print(f"  {symbol}: {len(entries)} wks, {entries[0]['date']} -> {last['date']}, "
+              f"bpL={last['bpLong']:,} bpS={last['bpShort']:,} bpNet={last['bpNet']:+,}, "
+              f"dlNet={last['dlNet']:+,}, oi={last['oi']:,}")
     return entries
 
 
 def load_all_data():
-    """Load data for all markets."""
     now = datetime.datetime.now()
     cache_key = 'cot_v3'
     if cache_key in _cache:
@@ -188,7 +163,7 @@ def load_all_data():
 
     _cache[cache_key] = data
     _cache_time[cache_key] = now
-    print(f"[COT] ═══ Cache ready — {len(data)} markets: {sorted(data.keys())} ═══")
+    print(f"[COT] ═══ Done — {len(data)}/{len(MARKETS)} markets loaded ═══")
     return data
 
 
@@ -196,13 +171,13 @@ def load_all_data():
 
 @app.route('/')
 def index():
-    return jsonify({'service': 'Vilasio COT API', 'version': '3.0', 'source': 'CFTC Legacy Futures Only (Socrata API)'})
+    return jsonify({'service': 'Vilasio COT API', 'version': '3.1', 'source': 'CFTC Legacy Futures Only'})
 
 @app.route('/health')
 def health():
     data = load_all_data()
     return jsonify({
-        'status': 'ok', 'version': '3.0',
+        'status': 'ok', 'version': '3.1',
         'markets': sorted(data.keys()) if data else [],
         'totalRows': sum(len(v) for v in data.values()) if data else 0,
         'time': datetime.datetime.utcnow().isoformat(),
@@ -261,18 +236,17 @@ def api_refresh():
 
 @app.route('/debug/raw/<symbol>')
 def debug_raw(symbol):
-    """Show raw CFTC API response for a market (latest 2 rows)."""
     symbol = symbol.upper()
     if symbol not in MARKETS:
         return jsonify({'error': 'Unknown', 'available': sorted(MARKETS.keys())}), 400
     cfg = MARKETS[symbol]
     params = {
-        '$where': f"market_and_exchange_names like '%{cfg['cftc_search']}%'",
+        '$where': f"contract_market_name='{cfg['cftc_name']}'",
         '$order': 'report_date_as_yyyy_mm_dd DESC',
         '$limit': '2',
     }
     rows = fetch_json(LEGACY_API, params)
-    return jsonify({'symbol': symbol, 'search': cfg['cftc_search'], 'rows': rows})
+    return jsonify({'symbol': symbol, 'cftc_name': cfg['cftc_name'], 'rows': rows})
 
 
 if __name__ == '__main__':
