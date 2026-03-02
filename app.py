@@ -1,19 +1,19 @@
 """
-Vilasio COT Backend v2.2
-Uses TWO CFTC CSV sources for full coverage:
-  - Traders in Financial Futures (TFF) for: ES, NQ, ZB, 6E, 6B, 6J
-  - Disaggregated Futures for: GC, CL, SI, NG, ZC, ZW
+Vilasio COT Backend v3.0
+Uses CFTC Socrata JSON API — no CSV header issues.
 
-Both are proper CSV with headers.
-Maps all data to unified bpLong/bpShort/dlLong/dlShort format for the frontend.
+Data sources:
+  - Legacy Futures Only API (6dca-aqww): NonComm/Comm for ALL markets
+    This matches Tradingster's data exactly.
+
+API docs: https://dev.socrata.com/foundry/publicreporting.cftc.gov/6dca-aqww
 """
 
 import os
-import io
-import csv
-import zipfile
+import json
 import datetime
 import urllib.request
+import urllib.parse
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -27,61 +27,49 @@ def add_cors(response):
     return response
 
 
-# ─── CFTC CSV URLs (both have proper headers) ──────────
-# TFF = Traders in Financial Futures (financial contracts: equity index, FX, rates)
-TFF_CURRENT = "https://www.cftc.gov/dea/newcot/FinFutWk.txt"
-TFF_HISTORY = "https://www.cftc.gov/files/dea/history/fut_fin_txt_{year}.zip"
-# Disaggregated (physical commodities: metals, energy, agriculture)
-DISAGG_CURRENT = "https://www.cftc.gov/dea/newcot/f_disagg.txt"
-DISAGG_HISTORY = "https://www.cftc.gov/files/dea/history/fut_disagg_txt_{year}.zip"
+# ─── CFTC Socrata API ──────────────────────────────────
+# Legacy Futures Only — has NonComm/Comm for ALL markets (matches Tradingster)
+LEGACY_API = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"
+
+# Page size — Socrata default limit is 1000, max is 50000
+PAGE_SIZE = 50000
 
 
 # ─── MARKET CONFIG ──────────────────────────────────────
-# source: "tff" or "disagg"
+# contract_market_name is the exact name used in the CFTC API
 MARKETS = {
     "ES": {"name": "E-Mini S&P 500",    "exchange": "Chicago Mercantile Exchange", "cat": "Equity",
-           "source": "tff", "match": "E-MINI S&P 500"},
+           "cftc_search": "S&P 500"},
     "NQ": {"name": "E-Mini Nasdaq 100", "exchange": "Chicago Mercantile Exchange", "cat": "Equity",
-           "source": "tff", "match": "NASDAQ MINI"},
-    "ZB": {"name": "30-Year T-Bond",    "exchange": "Chicago Board of Trade",      "cat": "Rates",
-           "source": "tff", "match": "UST BOND"},
-    "6E": {"name": "Euro FX",           "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "source": "tff", "match": "EURO FX"},
-    "6B": {"name": "British Pound",     "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "source": "tff", "match": "BRITISH POUND"},
-    "6J": {"name": "Japanese Yen",      "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "source": "tff", "match": "JAPANESE YEN"},
+           "cftc_search": "NASDAQ-100"},
     "GC": {"name": "Gold",              "exchange": "Commodity Exchange Inc.",      "cat": "Metals",
-           "source": "disagg", "match": "GOLD - COMMODITY EXCHANGE"},
+           "cftc_search": "GOLD"},
     "CL": {"name": "Crude Oil WTI",     "exchange": "New York Mercantile Exchange","cat": "Energy",
-           "source": "disagg", "match": "CRUDE OIL, LIGHT SWEET"},
+           "cftc_search": "CRUDE OIL, LIGHT SWEET"},
     "SI": {"name": "Silver",            "exchange": "Commodity Exchange Inc.",      "cat": "Metals",
-           "source": "disagg", "match": "SILVER - COMMODITY EXCHANGE"},
+           "cftc_search": "SILVER"},
+    "ZB": {"name": "30-Year T-Bond",    "exchange": "Chicago Board of Trade",      "cat": "Rates",
+           "cftc_search": "U.S. TREASURY BONDS"},
+    "6E": {"name": "Euro FX",           "exchange": "Chicago Mercantile Exchange", "cat": "FX",
+           "cftc_search": "EURO FX"},
+    "6B": {"name": "British Pound",     "exchange": "Chicago Mercantile Exchange", "cat": "FX",
+           "cftc_search": "BRITISH POUND"},
+    "6J": {"name": "Japanese Yen",      "exchange": "Chicago Mercantile Exchange", "cat": "FX",
+           "cftc_search": "JAPANESE YEN"},
     "NG": {"name": "Natural Gas",       "exchange": "New York Mercantile Exchange","cat": "Energy",
-           "source": "disagg", "match": "NATURAL GAS - NEW YORK MERCANTILE"},
+           "cftc_search": "NATURAL GAS"},
     "ZC": {"name": "Corn",              "exchange": "Chicago Board of Trade",      "cat": "Agri",
-           "source": "disagg", "match": "CORN - CHICAGO BOARD OF TRADE"},
+           "cftc_search": "CORN"},
     "ZW": {"name": "Wheat",             "exchange": "Chicago Board of Trade",      "cat": "Agri",
-           "source": "disagg", "match": "WHEAT-SRW - CHICAGO BOARD OF TRADE"},
+           "cftc_search": "WHEAT-SRW"},
 }
 
 
 def safe_int(val):
     try:
-        return int(str(val).strip().replace(',', ''))
+        return int(float(str(val).strip()))
     except Exception:
         return 0
-
-
-def match_market(name, source_filter):
-    """Match a CFTC market name to our ticker symbol, filtered by source type."""
-    name_upper = name.upper()
-    for symbol, cfg in MARKETS.items():
-        if cfg["source"] != source_filter:
-            continue
-        if cfg["match"].upper() in name_upper:
-            return symbol
-    return None
 
 
 # ─── CACHE ──────────────────────────────────────────────
@@ -90,261 +78,117 @@ _cache_time = {}
 CACHE_TTL = 3600 * 6
 
 
-def fetch_url(url, is_zip=True):
-    print(f"[COT] Fetching: {url}")
-    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/2.2'})
+def fetch_json(url, params=None):
+    """Fetch JSON from CFTC Socrata API."""
+    if params:
+        url = url + '?' + urllib.parse.urlencode(params)
+    print(f"[COT] Fetching: {url[:120]}...")
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'Vilasio/3.0',
+        'Accept': 'application/json',
+    })
     with urllib.request.urlopen(req, timeout=60) as resp:
-        raw = resp.read()
-    if is_zip:
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            txt_name = [n for n in zf.namelist()
-                        if n.endswith('.txt') or n.endswith('.csv')][0]
-            with zf.open(txt_name) as f:
-                return f.read().decode('utf-8', errors='replace')
-    else:
-        return raw.decode('utf-8', errors='replace')
+        return json.loads(resp.read().decode('utf-8'))
 
 
-def parse_date(row):
-    """Parse date from CFTC row, handling both date formats."""
-    date_str = (row.get('Report_Date_as_YYYY-MM-DD', '') or
-                row.get('As_of_Date_In_Form_YYMMDD', '')).strip()
-    if not date_str:
-        return None
-    try:
-        if '-' in date_str:
-            return datetime.datetime.strptime(date_str[:10], '%Y-%m-%d').strftime('%Y-%m-%d')
-        elif len(date_str) == 6:
-            return datetime.datetime.strptime(date_str, '%y%m%d').strftime('%Y-%m-%d')
-    except Exception:
-        pass
-    return None
-
-
-def parse_tff_csv(content):
+def fetch_market_data(symbol):
     """
-    Parse TFF (Traders in Financial Futures) CSV.
-    
-    TFF columns mapping to our model:
-    - Big Players = Lev_Money (Leveraged Funds = hedge funds/CTAs)
-    - Dealers = Dealer_Positions (Dealer/Intermediary)
-    
-    This matches what Tradingster shows for financial contracts.
-    Actually, Tradingster uses Legacy NonComm/Comm for these.
-    
-    For best match with Tradingster, we use:
-    - Big Players = Asset_Mgr (Asset Manager/Institutional) — the big directional players
-    - OR we combine: NonComm = Lev_Money + Asset_Mgr + Other_Rept
-    
-    To match Tradingster exactly (Legacy report), we need NonComm and Comm.
-    TFF doesn't have NonComm/Comm directly but the file DOES have them 
-    in some versions. Let's check what columns are available.
+    Fetch Legacy COT data for a single market from CFTC Socrata API.
+    Returns list of entries sorted by date.
     """
-    results = {}
-    reader = csv.DictReader(io.StringIO(content))
-    if reader.fieldnames:
-        reader.fieldnames = [f.strip() for f in reader.fieldnames]
+    cfg = MARKETS[symbol]
+    search_term = cfg["cftc_search"]
 
-    for row in reader:
-        market_name = row.get('Market_and_Exchange_Names', '').strip()
-        symbol = match_market(market_name, 'tff')
-        if not symbol:
+    # Calculate date range: 2.5 years back for Z-Score
+    end_date = datetime.date.today()
+    start_date = end_date - datetime.timedelta(days=365 * 3)
+
+    # SoQL query
+    params = {
+        '$where': f"market_and_exchange_names like '%{search_term}%' "
+                  f"AND report_date_as_yyyy_mm_dd >= '{start_date.isoformat()}'",
+        '$order': 'report_date_as_yyyy_mm_dd ASC',
+        '$limit': str(PAGE_SIZE),
+    }
+
+    rows = fetch_json(LEGACY_API, params)
+    print(f"[COT] {symbol} ({search_term}): got {len(rows)} rows from API")
+
+    if not rows:
+        return []
+
+    # If multiple contract names match, pick the one with highest OI (consolidated)
+    # Group by date, keep the row with highest open_interest_all per date
+    by_date = {}
+    for row in rows:
+        date_str = row.get('report_date_as_yyyy_mm_dd', '')
+        if not date_str:
             continue
+        date_iso = date_str[:10]  # Already YYYY-MM-DD format
+        oi = safe_int(row.get('open_interest_all', 0))
 
-        date_iso = parse_date(row)
-        if not date_iso:
-            continue
-
-        try:
-            # TFF has these trader categories:
-            # Dealer, Asset_Mgr, Lev_Money, Other_Rept, NonRept
-            # To approximate Legacy NonComm/Comm:
-            #   NonComm (Big Players) = Lev_Money Long/Short (hedge funds, speculators)
-            #   Comm (Dealers) = Dealer Long/Short (dealer/intermediary)
-            #
-            # BUT Tradingster's "Non-Commercial" for S&P 500 includes ALL non-commercial.
-            # In TFF: NonComm ~ Lev_Money + Asset_Mgr + Other_Rept
-            # In TFF: Comm ~ Dealer
-            #
-            # Let's provide Lev_Money as Big Players and Dealer as Dealers,
-            # since these are the most meaningful categories for trading signals.
-            
-            bp_long  = safe_int(row.get('Lev_Money_Positions_Long_All', 0))
-            bp_short = safe_int(row.get('Lev_Money_Positions_Short_All', 0))
-            dl_long  = safe_int(row.get('Dealer_Positions_Long_All', 0))
-            dl_short = safe_int(row.get('Dealer_Positions_Short_All', 0))
-            oi       = safe_int(row.get('Open_Interest_All', 0))
-
-            if oi == 0:
-                continue
-
-            entry = {
-                'date':    date_iso,
-                'bpLong':  bp_long,
-                'bpShort': bp_short,
-                'bpNet':   bp_long - bp_short,
-                'dlLong':  dl_long,
-                'dlShort': dl_short,
-                'dlNet':   dl_long - dl_short,
-                'oi':      oi,
+        if date_iso not in by_date or oi > by_date[date_iso]['_oi']:
+            by_date[date_iso] = {
+                '_oi': oi,
+                '_row': row,
+                '_market_name': row.get('market_and_exchange_names', ''),
             }
-            results.setdefault(symbol, []).append(entry)
-        except Exception:
+
+    entries = []
+    for date_iso in sorted(by_date.keys()):
+        row = by_date[date_iso]['_row']
+        bp_long  = safe_int(row.get('noncomm_positions_long_all', 0))
+        bp_short = safe_int(row.get('noncomm_positions_short_all', 0))
+        dl_long  = safe_int(row.get('comm_positions_long_all', 0))
+        dl_short = safe_int(row.get('comm_positions_short_all', 0))
+        oi       = safe_int(row.get('open_interest_all', 0))
+
+        if oi == 0:
             continue
 
-    for sym in results:
-        results[sym].sort(key=lambda x: x['date'])
-    return results
+        entries.append({
+            'date':    date_iso,
+            'bpLong':  bp_long,
+            'bpShort': bp_short,
+            'bpNet':   bp_long - bp_short,
+            'dlLong':  dl_long,
+            'dlShort': dl_short,
+            'dlNet':   dl_long - dl_short,
+            'oi':      oi,
+        })
 
+    if entries:
+        mkt_name = by_date[entries[-1]['date']]['_market_name']
+        last = entries[-1]
+        print(f"  {symbol}: matched '{mkt_name}', {len(entries)} weeks, "
+              f"{entries[0]['date']} -> {last['date']}, "
+              f"bpNet={last['bpNet']:+,}, dlNet={last['dlNet']:+,}, oi={last['oi']:,}")
 
-def parse_disagg_csv(content):
-    """
-    Parse Disaggregated Futures CSV.
-    
-    Disaggregated columns:
-    - Prod_Merc = Producer/Merchant (hedgers, like Comm in Legacy)
-    - Swap = Swap Dealers
-    - M_Money = Managed Money (like NonComm speculators)
-    - Other_Rept = Other Reportable
-    
-    Mapping:
-    - Big Players = M_Money (Managed Money = hedge funds)
-    - Dealers = Prod_Merc (Producer/Merchant = commercial hedgers)
-    """
-    results = {}
-    reader = csv.DictReader(io.StringIO(content))
-    if reader.fieldnames:
-        reader.fieldnames = [f.strip() for f in reader.fieldnames]
-
-    for row in reader:
-        market_name = row.get('Market_and_Exchange_Names', '').strip()
-        symbol = match_market(market_name, 'disagg')
-        if not symbol:
-            continue
-
-        date_iso = parse_date(row)
-        if not date_iso:
-            continue
-
-        try:
-            # Managed Money = Big Players (speculators)
-            bp_long  = safe_int(row.get('M_Money_Positions_Long_All', 0))
-            bp_short = safe_int(row.get('M_Money_Positions_Short_All', 0))
-            # Producer/Merchant = Dealers (commercial hedgers)
-            dl_long  = safe_int(row.get('Prod_Merc_Positions_Long_All', 0))
-            dl_short = safe_int(row.get('Prod_Merc_Positions_Short_All', 0))
-            oi       = safe_int(row.get('Open_Interest_All', 0))
-
-            if oi == 0:
-                continue
-
-            entry = {
-                'date':    date_iso,
-                'bpLong':  bp_long,
-                'bpShort': bp_short,
-                'bpNet':   bp_long - bp_short,
-                'dlLong':  dl_long,
-                'dlShort': dl_short,
-                'dlNet':   dl_long - dl_short,
-                'oi':      oi,
-            }
-            results.setdefault(symbol, []).append(entry)
-        except Exception:
-            continue
-
-    for sym in results:
-        results[sym].sort(key=lambda x: x['date'])
-    return results
+    return entries
 
 
 def load_all_data():
+    """Load data for all markets."""
     now = datetime.datetime.now()
-    cache_key = 'cot_v2'
+    cache_key = 'cot_v3'
     if cache_key in _cache:
         age = (now - _cache_time[cache_key]).total_seconds()
         if age < CACHE_TTL:
             return _cache[cache_key]
 
-    year = now.year
+    print(f"[COT] ═══ Loading all markets from CFTC Legacy API... ═══")
     data = {}
-
-    # ── TFF (Financial markets: ES, NQ, ZB, 6E, 6B, 6J) ──
-    for yr in [year - 2, year - 1]:
+    for symbol in sorted(MARKETS.keys()):
         try:
-            content = fetch_url(TFF_HISTORY.format(year=yr), is_zip=True)
-            yr_data = parse_tff_csv(content)
-            for sym, entries in yr_data.items():
-                data.setdefault(sym, []).extend(entries)
-            print(f"[COT] TFF {yr}: {sum(len(v) for v in yr_data.values())} rows — {sorted(yr_data.keys())}")
+            entries = fetch_market_data(symbol)
+            if entries:
+                data[symbol] = entries
         except Exception as e:
-            print(f"[COT] TFF {yr} error: {e}")
-
-    # TFF current year
-    try:
-        content = fetch_url(TFF_CURRENT, is_zip=False)
-        yr_data = parse_tff_csv(content)
-        for sym, entries in yr_data.items():
-            data.setdefault(sym, []).extend(entries)
-        print(f"[COT] TFF current: {sum(len(v) for v in yr_data.values())} rows — {sorted(yr_data.keys())}")
-    except Exception as e:
-        print(f"[COT] TFF current error: {e}")
-        try:
-            content = fetch_url(TFF_HISTORY.format(year=year), is_zip=True)
-            yr_data = parse_tff_csv(content)
-            for sym, entries in yr_data.items():
-                data.setdefault(sym, []).extend(entries)
-            print(f"[COT] TFF current (zip fallback): {sum(len(v) for v in yr_data.values())} rows")
-        except Exception as e2:
-            print(f"[COT] TFF current zip error: {e2}")
-
-    # ── Disaggregated (Commodity markets: GC, CL, SI, NG, ZC, ZW) ──
-    for yr in [year - 2, year - 1]:
-        try:
-            content = fetch_url(DISAGG_HISTORY.format(year=yr), is_zip=True)
-            yr_data = parse_disagg_csv(content)
-            for sym, entries in yr_data.items():
-                data.setdefault(sym, []).extend(entries)
-            print(f"[COT] Disagg {yr}: {sum(len(v) for v in yr_data.values())} rows — {sorted(yr_data.keys())}")
-        except Exception as e:
-            print(f"[COT] Disagg {yr} error: {e}")
-
-    # Disaggregated current year
-    try:
-        content = fetch_url(DISAGG_CURRENT, is_zip=False)
-        yr_data = parse_disagg_csv(content)
-        for sym, entries in yr_data.items():
-            data.setdefault(sym, []).extend(entries)
-        print(f"[COT] Disagg current: {sum(len(v) for v in yr_data.values())} rows — {sorted(yr_data.keys())}")
-    except Exception as e:
-        print(f"[COT] Disagg current error: {e}")
-        try:
-            content = fetch_url(DISAGG_HISTORY.format(year=year), is_zip=True)
-            yr_data = parse_disagg_csv(content)
-            for sym, entries in yr_data.items():
-                data.setdefault(sym, []).extend(entries)
-            print(f"[COT] Disagg current (zip fallback): {sum(len(v) for v in yr_data.values())} rows")
-        except Exception as e2:
-            print(f"[COT] Disagg current zip error: {e2}")
-
-    # Deduplicate by date per symbol
-    for sym in data:
-        seen = set()
-        unique = []
-        for e in sorted(data[sym], key=lambda x: x['date']):
-            if e['date'] not in seen:
-                seen.add(e['date'])
-                unique.append(e)
-        data[sym] = unique
+            print(f"[COT] {symbol} error: {e}")
 
     _cache[cache_key] = data
     _cache_time[cache_key] = now
     print(f"[COT] ═══ Cache ready — {len(data)} markets: {sorted(data.keys())} ═══")
-    for sym in sorted(data.keys()):
-        entries = data[sym]
-        if entries:
-            last = entries[-1]
-            print(f"  {sym}: {len(entries)} wks, {entries[0]['date']} -> {last['date']}, "
-                  f"bpNet={last['bpNet']:+,}, dlNet={last['dlNet']:+,}, oi={last['oi']:,}")
     return data
 
 
@@ -352,36 +196,30 @@ def load_all_data():
 
 @app.route('/')
 def index():
-    return jsonify({'service': 'Vilasio COT API', 'version': '2.2'})
-
+    return jsonify({'service': 'Vilasio COT API', 'version': '3.0', 'source': 'CFTC Legacy Futures Only (Socrata API)'})
 
 @app.route('/health')
 def health():
     data = load_all_data()
     return jsonify({
-        'status': 'ok', 'version': '2.2',
+        'status': 'ok', 'version': '3.0',
         'markets': sorted(data.keys()) if data else [],
         'totalRows': sum(len(v) for v in data.values()) if data else 0,
         'time': datetime.datetime.utcnow().isoformat(),
     })
 
-
 @app.route('/api/cot')
 def api_cot():
     market = request.args.get('market', '').upper()
     weeks = max(4, min(int(request.args.get('weeks', 52)), 260))
-
     if market not in MARKETS:
         return jsonify({'error': f'Unknown market: {market}', 'available': sorted(MARKETS.keys())}), 400
-
     data = load_all_data()
     if market not in data or not data[market]:
         return jsonify({'error': f'No data for {market}'}), 404
-
     entries = data[market]
     entries = entries[-(weeks + 1):] if len(entries) > weeks + 1 else entries
     cfg = MARKETS[market]
-
     return jsonify({
         'market': market, 'name': cfg['name'], 'exchange': cfg['exchange'], 'cat': cfg['cat'],
         'reportDate': entries[-1]['date'],
@@ -394,7 +232,6 @@ def api_cot():
         'dlNet':   [e['dlNet'] for e in entries],
         'oi':      [e['oi'] for e in entries],
     })
-
 
 @app.route('/api/cot/summary')
 def api_cot_summary():
@@ -411,9 +248,8 @@ def api_cot_summary():
         })
     return jsonify({
         'markets': results,
-        'lastFetch': _cache_time.get('cot_v2', datetime.datetime.now()).isoformat(),
+        'lastFetch': _cache_time.get('cot_v3', datetime.datetime.now()).isoformat(),
     })
-
 
 @app.route('/api/cot/refresh')
 def api_refresh():
@@ -423,55 +259,20 @@ def api_refresh():
     return jsonify({'status': 'refreshed', 'markets': sorted(data.keys()),
                     'rows': {sym: len(e) for sym, e in data.items()}})
 
-
-@app.route('/debug/columns')
-def debug_columns():
-    """Show actual CSV column names from both sources."""
-    result = {}
-    try:
-        content = fetch_url(TFF_CURRENT, is_zip=False)
-        reader = csv.DictReader(io.StringIO(content))
-        if reader.fieldnames:
-            reader.fieldnames = [f.strip() for f in reader.fieldnames]
-            result['tff_columns'] = reader.fieldnames
-    except Exception as e:
-        result['tff_error'] = str(e)
-
-    try:
-        content = fetch_url(DISAGG_CURRENT, is_zip=False)
-        reader = csv.DictReader(io.StringIO(content))
-        if reader.fieldnames:
-            reader.fieldnames = [f.strip() for f in reader.fieldnames]
-            result['disagg_columns'] = reader.fieldnames
-    except Exception as e:
-        result['disagg_error'] = str(e)
-
-    return jsonify(result)
-
-
-@app.route('/debug/markets')
-def debug_markets():
-    """Show matched and unmatched market names."""
-    result = {}
-    for label, url, source in [('tff', TFF_CURRENT, 'tff'), ('disagg', DISAGG_CURRENT, 'disagg')]:
-        try:
-            content = fetch_url(url, is_zip=False)
-            reader = csv.DictReader(io.StringIO(content))
-            if reader.fieldnames:
-                reader.fieldnames = [f.strip() for f in reader.fieldnames]
-            names = sorted(set(
-                row.get('Market_and_Exchange_Names', '').strip()
-                for row in reader if row.get('Market_and_Exchange_Names', '').strip()
-            ))
-            matched = {}
-            for n in names:
-                sym = match_market(n, source)
-                if sym:
-                    matched[sym] = n
-            result[label] = {'count': len(names), 'matched': matched, 'all': names}
-        except Exception as e:
-            result[label] = {'error': str(e)}
-    return jsonify(result)
+@app.route('/debug/raw/<symbol>')
+def debug_raw(symbol):
+    """Show raw CFTC API response for a market (latest 2 rows)."""
+    symbol = symbol.upper()
+    if symbol not in MARKETS:
+        return jsonify({'error': 'Unknown', 'available': sorted(MARKETS.keys())}), 400
+    cfg = MARKETS[symbol]
+    params = {
+        '$where': f"market_and_exchange_names like '%{cfg['cftc_search']}%'",
+        '$order': 'report_date_as_yyyy_mm_dd DESC',
+        '$limit': '2',
+    }
+    rows = fetch_json(LEGACY_API, params)
+    return jsonify({'symbol': symbol, 'search': cfg['cftc_search'], 'rows': rows})
 
 
 if __name__ == '__main__':
