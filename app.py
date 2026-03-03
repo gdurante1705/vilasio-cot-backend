@@ -279,7 +279,61 @@ def api_flow():
         regime = 'RISK-OFF'
     else:
         regime = 'ROTATION'
-    return jsonify({'categories': cats, 'regime': regime, 'catOrder': FLOW_CATS})
+    # Compute correlation-based flow matrix between categories
+    # Uses inverse correlation of WoW changes over last 26 weeks
+    flow_links = []
+    outflows = [c for c in FLOW_CATS if cats.get(c, {}).get('bpNetChg', 0) < 0]
+    inflows = [c for c in FLOW_CATS if cats.get(c, {}).get('bpNetChg', 0) > 0]
+    if outflows and inflows:
+        # Build weekly change series per category over 26 weeks
+        cat_series = {}
+        for cat in FLOW_CATS:
+            series = []
+            for w in range(min(26, min(len(v) for v in data.values() if v) - 1)):
+                total = 0
+                for sym in MARKETS:
+                    if MARKETS[sym]['cat'] != cat or sym not in data: continue
+                    entries = data[sym]
+                    if len(entries) < w + 2: continue
+                    total += entries[-(w+1)]['bpNet'] - entries[-(w+2)]['bpNet']
+                series.append(total)
+            cat_series[cat] = series
+        # For each outflow-inflow pair, compute inverse correlation strength
+        for src in outflows:
+            src_val = abs(cats[src]['bpNetChg'])
+            for dst in inflows:
+                dst_val = cats[dst]['bpNetChg']
+                s1, s2 = cat_series.get(src, []), cat_series.get(dst, [])
+                n = min(len(s1), len(s2))
+                if n < 4:
+                    # Not enough data, use proportional fallback
+                    strength = dst_val / sum(cats[c]['bpNetChg'] for c in inflows)
+                else:
+                    # Inverse correlation: when src goes down, does dst go up?
+                    m1, m2 = sum(s1[:n])/n, sum(s2[:n])/n
+                    num = sum((s1[i]-m1)*(s2[i]-m2) for i in range(n))
+                    d1 = max(1, sum((s1[i]-m1)**2 for i in range(n))**0.5)
+                    d2 = max(1, sum((s2[i]-m2)**2 for i in range(n))**0.5)
+                    corr = num / (d1 * d2)
+                    # Negative correlation = money flowing from src to dst
+                    # Scale: -1 (strong flow) to +1 (no flow)
+                    weight = max(0, -corr)
+                    total_weight = 0.001
+                    for d2c in inflows:
+                        s2b = cat_series.get(d2c, [])
+                        nb = min(len(s1), len(s2b))
+                        if nb < 4: continue
+                        m2b = sum(s2b[:nb])/nb
+                        numb = sum((s1[i]-m1)*(s2b[i]-m2b) for i in range(nb))
+                        d1b = max(1, sum((s1[i]-m1)**2 for i in range(nb))**0.5)
+                        d2b2 = max(1, sum((s2b[i]-m2b)**2 for i in range(nb))**0.5)
+                        corrb = numb / (d1b * d2b2)
+                        total_weight += max(0, -corrb)
+                    strength = weight / total_weight if total_weight > 0 else 0
+                flow = round(src_val * strength)
+                if flow > 0:
+                    flow_links.append({'from': src, 'to': dst, 'value': flow})
+    return jsonify({'categories': cats, 'regime': regime, 'catOrder': FLOW_CATS, 'flowLinks': flow_links})
 
 @app.route('/api/cot/refresh')
 def api_refresh():
