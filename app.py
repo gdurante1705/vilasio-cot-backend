@@ -1,7 +1,7 @@
 """
-Vilasio COT Backend v3.4
+Vilasio COT Backend v3.5
 CFTC Socrata + Yahoo Finance daily prices.
-Expanded markets (~40) for Capital Flow Map.
+Expanded markets with corrected CFTC names.
 """
 import os, json, datetime, urllib.request, urllib.parse
 from flask import Flask, jsonify, request
@@ -18,44 +18,37 @@ def add_cors(response):
 LEGACY_API = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"
 PAGE_SIZE = 50000
 
-# ---- EXPANDED MARKETS ----
-# cat: category for flow map grouping
-# cftc_name: exact match for contract_market_name in CFTC API
-# yf: Yahoo Finance symbol for price data
 MARKETS = {
     # EQUITY
     "ES":  {"name":"E-Mini S&P 500",     "exchange":"CME","cat":"Equity","cftc_name":"S&P 500 Consolidated","yf":"ES=F"},
     "NQ":  {"name":"E-Mini Nasdaq 100",  "exchange":"CME","cat":"Equity","cftc_name":"NASDAQ-100 Consolidated","yf":"NQ=F"},
     "YM":  {"name":"E-Mini Dow Jones",   "exchange":"CBOT","cat":"Equity","cftc_name":"DJIA Consolidated","yf":"YM=F"},
-    "RTY": {"name":"E-Mini Russell 2000","exchange":"CME","cat":"Equity","cftc_name":"RUSSELL E-MINI Consolidated","yf":"RTY=F"},
+    "RTY": {"name":"E-Mini Russell 2000","exchange":"CME","cat":"Equity","cftc_name":"RUSSELL 2000 MINI","yf":"RTY=F"},
     "VIX": {"name":"VIX Futures",        "exchange":"CBOE","cat":"Equity","cftc_name":"VIX FUTURES","yf":"^VIX"},
     # ENERGY
     "CL":  {"name":"Crude Oil WTI",  "exchange":"NYMEX","cat":"Energy","cftc_name":"WTI-PHYSICAL","yf":"CL=F"},
     "NG":  {"name":"Natural Gas",    "exchange":"NYMEX","cat":"Energy","cftc_name":"NAT GAS NYME","yf":"NG=F"},
-    "RB":  {"name":"RBOB Gasoline",  "exchange":"NYMEX","cat":"Energy","cftc_name":"GASOLINE BLENDSTOCK (RBOB)","yf":"RB=F"},
-    "HO":  {"name":"Heating Oil",    "exchange":"NYMEX","cat":"Energy","cftc_name":"NO. 2 HEATING OIL","yf":"HO=F"},
     # METALS
     "GC":  {"name":"Gold",     "exchange":"COMEX","cat":"Metals","cftc_name":"GOLD","yf":"GC=F"},
     "SI":  {"name":"Silver",   "exchange":"COMEX","cat":"Metals","cftc_name":"SILVER","yf":"SI=F"},
-    "HG":  {"name":"Copper",   "exchange":"COMEX","cat":"Metals","cftc_name":"COPPER-GRADE #1","yf":"HG=F"},
+    "HG":  {"name":"Copper",   "exchange":"COMEX","cat":"Metals","cftc_name":"COPPER","yf":"HG=F"},
     "PL":  {"name":"Platinum", "exchange":"NYMEX","cat":"Metals","cftc_name":"PLATINUM","yf":"PL=F"},
     "PA":  {"name":"Palladium","exchange":"NYMEX","cat":"Metals","cftc_name":"PALLADIUM","yf":"PA=F"},
     # FX
-    "6E":  {"name":"Euro FX",       "exchange":"CME","cat":"FX","cftc_name":"EURO FX","yf":"EURUSD=X"},
-    "6B":  {"name":"British Pound", "exchange":"CME","cat":"FX","cftc_name":"BRITISH POUND","yf":"GBPUSD=X"},
-    "6J":  {"name":"Japanese Yen",  "exchange":"CME","cat":"FX","cftc_name":"JAPANESE YEN","yf":"JPY=X"},
+    "6E":  {"name":"Euro FX",          "exchange":"CME","cat":"FX","cftc_name":"EURO FX","yf":"EURUSD=X"},
+    "6B":  {"name":"British Pound",    "exchange":"CME","cat":"FX","cftc_name":"BRITISH POUND","yf":"GBPUSD=X"},
+    "6J":  {"name":"Japanese Yen",     "exchange":"CME","cat":"FX","cftc_name":"JAPANESE YEN","yf":"JPY=X"},
     "6A":  {"name":"Australian Dollar","exchange":"CME","cat":"FX","cftc_name":"AUSTRALIAN DOLLAR","yf":"AUDUSD=X"},
     "6C":  {"name":"Canadian Dollar",  "exchange":"CME","cat":"FX","cftc_name":"CANADIAN DOLLAR","yf":"CADUSD=X"},
     "6S":  {"name":"Swiss Franc",      "exchange":"CME","cat":"FX","cftc_name":"SWISS FRANC","yf":"CHFUSD=X"},
-    "6N":  {"name":"New Zealand Dollar","exchange":"CME","cat":"FX","cftc_name":"NEW ZEALAND DOLLAR","yf":"NZDUSD=X"},
-    "6M":  {"name":"Mexican Peso",     "exchange":"CME","cat":"FX","cftc_name":"MEXICAN PESO","yf":"MXNUSD=X"},
-    "DX":  {"name":"US Dollar Index",  "exchange":"ICE","cat":"FX","cftc_name":"U.S. DOLLAR INDEX","yf":"DX-Y.NYB"},
+    "6N":  {"name":"New Zealand Dollar","exchange":"CME","cat":"FX","cftc_name":"NZ DOLLAR","yf":"NZDUSD=X"},
+    "DX":  {"name":"US Dollar Index",  "exchange":"ICE","cat":"FX","cftc_name":"USD INDEX","yf":"DX-Y.NYB"},
     # RATES
     "ZB":  {"name":"30-Year T-Bond",  "exchange":"CBOT","cat":"Rates","cftc_name":"UST BOND","yf":"ZB=F"},
-    "ZN":  {"name":"10-Year T-Note",  "exchange":"CBOT","cat":"Rates","cftc_name":"UST 10Y NOTE","yf":"ZN=F"},
-    "ZF":  {"name":"5-Year T-Note",   "exchange":"CBOT","cat":"Rates","cftc_name":"UST 5Y NOTE","yf":"ZF=F"},
-    "ZT":  {"name":"2-Year T-Note",   "exchange":"CBOT","cat":"Rates","cftc_name":"UST 2Y NOTE","yf":"ZT=F"},
-    "ZQ":  {"name":"30-Day Fed Funds","exchange":"CBOT","cat":"Rates","cftc_name":"30-DAY FEDERAL FUNDS","yf":"ZQ=F"},
+    "ZN":  {"name":"10-Year T-Note",  "exchange":"CBOT","cat":"Rates","cftc_name":"10-YEAR","yf":"ZN=F"},
+    "ZF":  {"name":"5-Year T-Note",   "exchange":"CBOT","cat":"Rates","cftc_name":"5-YEAR","yf":"ZF=F"},
+    "ZT":  {"name":"2-Year T-Note",   "exchange":"CBOT","cat":"Rates","cftc_name":"2-YEAR","yf":"ZT=F"},
+    "ZQ":  {"name":"30-Day Fed Funds","exchange":"CBOT","cat":"Rates","cftc_name":"FED FUNDS","yf":"ZQ=F"},
     # GRAINS
     "ZC":  {"name":"Corn",        "exchange":"CBOT","cat":"Grains","cftc_name":"CORN","yf":"ZC=F"},
     "ZW":  {"name":"Wheat SRW",   "exchange":"CBOT","cat":"Grains","cftc_name":"WHEAT-SRW","yf":"ZW=F"},
@@ -64,10 +57,10 @@ MARKETS = {
     "ZL":  {"name":"Soybean Oil", "exchange":"CBOT","cat":"Grains","cftc_name":"SOYBEAN OIL","yf":"ZL=F"},
     "ZM":  {"name":"Soybean Meal","exchange":"CBOT","cat":"Grains","cftc_name":"SOYBEAN MEAL","yf":"ZM=F"},
     # SOFTS
-    "CC":  {"name":"Cocoa",   "exchange":"ICE","cat":"Softs","cftc_name":"COCOA","yf":"CC=F"},
-    "KC":  {"name":"Coffee",  "exchange":"ICE","cat":"Softs","cftc_name":"COFFEE C","yf":"KC=F"},
-    "CT":  {"name":"Cotton",  "exchange":"ICE","cat":"Softs","cftc_name":"COTTON NO. 2","yf":"CT=F"},
-    "SB":  {"name":"Sugar",   "exchange":"ICE","cat":"Softs","cftc_name":"SUGAR NO. 11","yf":"SB=F"},
+    "CC":  {"name":"Cocoa",       "exchange":"ICE","cat":"Softs","cftc_name":"COCOA","yf":"CC=F"},
+    "KC":  {"name":"Coffee",      "exchange":"ICE","cat":"Softs","cftc_name":"COFFEE C","yf":"KC=F"},
+    "CT":  {"name":"Cotton",      "exchange":"ICE","cat":"Softs","cftc_name":"COTTON NO. 2","yf":"CT=F"},
+    "SB":  {"name":"Sugar",       "exchange":"ICE","cat":"Softs","cftc_name":"SUGAR NO. 11","yf":"SB=F"},
     "OJ":  {"name":"Orange Juice","exchange":"ICE","cat":"Softs","cftc_name":"FRZN CONCENTRATED ORANGE JUICE","yf":"OJ=F"},
     # LIVESTOCK
     "LE":  {"name":"Live Cattle",  "exchange":"CME","cat":"Livestock","cftc_name":"LIVE CATTLE","yf":"LE=F"},
@@ -75,10 +68,7 @@ MARKETS = {
     "HE":  {"name":"Lean Hogs",   "exchange":"CME","cat":"Livestock","cftc_name":"LEAN HOGS","yf":"HE=F"},
 }
 
-# Which markets appear in the heatmap (original 12 core markets)
 HEATMAP_MARKETS = ["ES","NQ","GC","CL","SI","ZB","6E","6B","6J","NG","ZC","ZW"]
-
-# Categories for flow map
 FLOW_CATS = ["Equity","Energy","Metals","FX","Rates","Grains","Softs","Livestock"]
 
 def safe_int(val):
@@ -91,24 +81,32 @@ CACHE_TTL = 3600 * 6
 
 def fetch_json(url, params=None):
     if params: url = url + '?' + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.4', 'Accept': 'application/json'})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.5', 'Accept': 'application/json'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
 def fetch_market_data(symbol):
     cfg = MARKETS[symbol]
+    cn = cfg['cftc_name']
     start_date = (datetime.date.today() - datetime.timedelta(days=365*3)).isoformat()
+    # Try exact match first, then LIKE match for partial names
     params = {
-        '$where': "contract_market_name='" + cfg['cftc_name'] + "' AND report_date_as_yyyy_mm_dd >= '" + start_date + "'",
+        '$where': "contract_market_name='" + cn + "' AND report_date_as_yyyy_mm_dd >= '" + start_date + "'",
         '$order': 'report_date_as_yyyy_mm_dd ASC',
         '$limit': str(PAGE_SIZE)
     }
     try:
         rows = fetch_json(LEGACY_API, params)
+        # If no exact match, try LIKE match
+        if not rows:
+            params['$where'] = "starts_with(contract_market_name, '" + cn + "') AND report_date_as_yyyy_mm_dd >= '" + start_date + "'"
+            rows = fetch_json(LEGACY_API, params)
     except Exception as e:
         print("[COT] " + symbol + " fetch error: " + str(e))
         return []
-    if not rows: return []
+    if not rows:
+        print("[COT] " + symbol + " (" + cn + "): no data found")
+        return []
     entries, seen = [], set()
     for row in rows:
         ds = row.get('report_date_as_yyyy_mm_dd', '')
@@ -128,7 +126,7 @@ def fetch_market_data(symbol):
 
 def load_all_data():
     now = datetime.datetime.now()
-    ck = 'cot_v34'
+    ck = 'cot_v35'
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
     print("[COT] Loading all " + str(len(MARKETS)) + " markets...")
@@ -188,17 +186,15 @@ def get_daily_prices(symbol, start_date, end_date):
     dates = sorted([d for d in pm.keys() if start_date <= d <= end_date])
     return dates, [pm[d] for d in dates]
 
-# ---- ENDPOINTS ----
-
 @app.route('/')
 def index():
-    return jsonify({'service': 'Vilasio COT API', 'version': '3.4', 'markets': len(MARKETS)})
+    return jsonify({'service': 'Vilasio COT API', 'version': '3.5', 'markets': len(MARKETS)})
 
 @app.route('/health')
 def health():
     data = load_all_data()
     return jsonify({
-        'status': 'ok', 'version': '3.4',
+        'status': 'ok', 'version': '3.5',
         'markets': sorted(data.keys()) if data else [],
         'totalMarkets': len(MARKETS),
         'loadedMarkets': len(data) if data else 0,
@@ -254,7 +250,6 @@ def api_cot_summary():
 
 @app.route('/api/cot/flow')
 def api_flow():
-    """Capital flow map data - aggregated by category."""
     data = load_all_data()
     cats = {}
     for cat in FLOW_CATS:
@@ -274,7 +269,6 @@ def api_flow():
             'market': sym, 'name': MARKETS[sym]['name'],
             'bpNetChg': bpChg, 'dlNetChg': dlChg, 'oiChg': oiChg
         })
-    # Determine regime
     eq = cats.get('Equity', {}).get('bpNetChg', 0)
     safe = cats.get('Metals', {}).get('bpNetChg', 0) + cats.get('Rates', {}).get('bpNetChg', 0)
     if eq > 10000 and safe < -5000:
@@ -293,7 +287,6 @@ def api_refresh():
 
 @app.route('/api/markets')
 def api_markets():
-    """List all available markets with metadata."""
     result = []
     for sym in sorted(MARKETS.keys()):
         cfg = MARKETS[sym]
