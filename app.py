@@ -1,13 +1,9 @@
 """
-Vilasio COT Backend v3.2
-CFTC Socrata JSON API + Yahoo Finance price overlay.
+Vilasio COT Backend v3.3
+CFTC Socrata + Yahoo Finance daily prices.
+Returns daily price series alongside weekly COT data.
 """
-
-import os
-import json
-import datetime
-import urllib.request
-import urllib.parse
+import os, json, datetime, urllib.request, urllib.parse
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -21,32 +17,19 @@ def add_cors(response):
 
 LEGACY_API = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"
 PAGE_SIZE = 50000
-
 MARKETS = {
-    "ES": {"name": "E-Mini S&P 500", "exchange": "Chicago Mercantile Exchange", "cat": "Equity",
-           "cftc_name": "S&P 500 Consolidated", "yf": "ES=F"},
-    "NQ": {"name": "E-Mini Nasdaq 100", "exchange": "Chicago Mercantile Exchange", "cat": "Equity",
-           "cftc_name": "NASDAQ-100 Consolidated", "yf": "NQ=F"},
-    "GC": {"name": "Gold", "exchange": "Commodity Exchange Inc.", "cat": "Metals",
-           "cftc_name": "GOLD", "yf": "GC=F"},
-    "CL": {"name": "Crude Oil WTI", "exchange": "New York Mercantile Exchange", "cat": "Energy",
-           "cftc_name": "WTI-PHYSICAL", "yf": "CL=F"},
-    "SI": {"name": "Silver", "exchange": "Commodity Exchange Inc.", "cat": "Metals",
-           "cftc_name": "SILVER", "yf": "SI=F"},
-    "ZB": {"name": "30-Year T-Bond", "exchange": "Chicago Board of Trade", "cat": "Rates",
-           "cftc_name": "UST BOND", "yf": "ZB=F"},
-    "6E": {"name": "Euro FX", "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "cftc_name": "EURO FX", "yf": "EURUSD=X"},
-    "6B": {"name": "British Pound", "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "cftc_name": "BRITISH POUND", "yf": "GBPUSD=X"},
-    "6J": {"name": "Japanese Yen", "exchange": "Chicago Mercantile Exchange", "cat": "FX",
-           "cftc_name": "JAPANESE YEN", "yf": "JPY=X"},
-    "NG": {"name": "Natural Gas", "exchange": "New York Mercantile Exchange", "cat": "Energy",
-           "cftc_name": "NAT GAS NYME", "yf": "NG=F"},
-    "ZC": {"name": "Corn", "exchange": "Chicago Board of Trade", "cat": "Agri",
-           "cftc_name": "CORN", "yf": "ZC=F"},
-    "ZW": {"name": "Wheat", "exchange": "Chicago Board of Trade", "cat": "Agri",
-           "cftc_name": "WHEAT-SRW", "yf": "KE=F"},
+    "ES": {"name": "E-Mini S&P 500", "exchange": "Chicago Mercantile Exchange", "cat": "Equity", "cftc_name": "S&P 500 Consolidated", "yf": "ES=F"},
+    "NQ": {"name": "E-Mini Nasdaq 100", "exchange": "Chicago Mercantile Exchange", "cat": "Equity", "cftc_name": "NASDAQ-100 Consolidated", "yf": "NQ=F"},
+    "GC": {"name": "Gold", "exchange": "Commodity Exchange Inc.", "cat": "Metals", "cftc_name": "GOLD", "yf": "GC=F"},
+    "CL": {"name": "Crude Oil WTI", "exchange": "New York Mercantile Exchange", "cat": "Energy", "cftc_name": "WTI-PHYSICAL", "yf": "CL=F"},
+    "SI": {"name": "Silver", "exchange": "Commodity Exchange Inc.", "cat": "Metals", "cftc_name": "SILVER", "yf": "SI=F"},
+    "ZB": {"name": "30-Year T-Bond", "exchange": "Chicago Board of Trade", "cat": "Rates", "cftc_name": "UST BOND", "yf": "ZB=F"},
+    "6E": {"name": "Euro FX", "exchange": "Chicago Mercantile Exchange", "cat": "FX", "cftc_name": "EURO FX", "yf": "EURUSD=X"},
+    "6B": {"name": "British Pound", "exchange": "Chicago Mercantile Exchange", "cat": "FX", "cftc_name": "BRITISH POUND", "yf": "GBPUSD=X"},
+    "6J": {"name": "Japanese Yen", "exchange": "Chicago Mercantile Exchange", "cat": "FX", "cftc_name": "JAPANESE YEN", "yf": "JPY=X"},
+    "NG": {"name": "Natural Gas", "exchange": "New York Mercantile Exchange", "cat": "Energy", "cftc_name": "NAT GAS NYME", "yf": "NG=F"},
+    "ZC": {"name": "Corn", "exchange": "Chicago Board of Trade", "cat": "Agri", "cftc_name": "CORN", "yf": "ZC=F"},
+    "ZW": {"name": "Wheat", "exchange": "Chicago Board of Trade", "cat": "Agri", "cftc_name": "WHEAT-SRW", "yf": "KE=F"},
 }
 
 def safe_int(val):
@@ -58,23 +41,16 @@ _cache_time = {}
 CACHE_TTL = 3600 * 6
 
 def fetch_json(url, params=None):
-    if params:
-        url = url + '?' + urllib.parse.urlencode(params)
-    print(f"[COT] Fetching: {url[:150]}...")
-    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.2', 'Accept': 'application/json'})
+    if params: url = url + '?' + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.3', 'Accept': 'application/json'})
     with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
 def fetch_market_data(symbol):
     cfg = MARKETS[symbol]
-    start_date = (datetime.date.today() - datetime.timedelta(days=365 * 3)).isoformat()
-    params = {
-        '$where': f"contract_market_name='{cfg['cftc_name']}' AND report_date_as_yyyy_mm_dd >= '{start_date}'",
-        '$order': 'report_date_as_yyyy_mm_dd ASC',
-        '$limit': str(PAGE_SIZE),
-    }
+    start_date = (datetime.date.today() - datetime.timedelta(days=365*3)).isoformat()
+    params = {'$where': "contract_market_name='" + cfg['cftc_name'] + "' AND report_date_as_yyyy_mm_dd >= '" + start_date + "'", '$order': 'report_date_as_yyyy_mm_dd ASC', '$limit': str(PAGE_SIZE)}
     rows = fetch_json(LEGACY_API, params)
-    print(f"[COT] {symbol} ('{cfg['cftc_name']}'): {len(rows)} rows")
     if not rows: return []
     entries, seen = [], set()
     for row in rows:
@@ -89,130 +65,97 @@ def fetch_market_data(symbol):
         ds2 = safe_int(row.get('comm_positions_short_all', 0))
         oi = safe_int(row.get('open_interest_all', 0))
         if oi == 0: continue
-        entries.append({'date': di, 'bpLong': bl, 'bpShort': bs, 'bpNet': bl - bs,
-                        'dlLong': dl, 'dlShort': ds2, 'dlNet': dl - ds2, 'oi': oi})
+        entries.append({'date': di, 'bpLong': bl, 'bpShort': bs, 'bpNet': bl-bs, 'dlLong': dl, 'dlShort': ds2, 'dlNet': dl-ds2, 'oi': oi})
     entries.sort(key=lambda x: x['date'])
     return entries
 
 def load_all_data():
     now = datetime.datetime.now()
     ck = 'cot_v3'
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
-        return _cache[ck]
-    print("[COT] Loading all markets...")
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL: return _cache[ck]
     data = {}
     for sym in sorted(MARKETS.keys()):
         try:
             e = fetch_market_data(sym)
             if e: data[sym] = e
-        except Exception as ex:
-            print(f"[COT] {sym} error: {ex}")
-    _cache[ck] = data
-    _cache_time[ck] = now
-    print(f"[COT] Done - {len(data)}/{len(MARKETS)} markets")
+        except Exception as ex: print("[COT] " + sym + " error: " + str(ex))
+    _cache[ck] = data; _cache_time[ck] = now
     return data
 
-
-# ─── PRICE DATA ─────────────────────────────────────────
-
 def load_price_map(symbol):
-    """Load daily prices from yfinance, cached for 6h."""
-    ck = f'price_{symbol}'
+    ck = 'price_' + symbol
     now = datetime.datetime.now()
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
-        return _cache[ck]
-
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL: return _cache[ck]
     import yfinance as yf
-    cfg = MARKETS[symbol]
-    yf_sym = cfg["yf"]
-    start = (datetime.date.today() - datetime.timedelta(days=365 * 3 + 30)).isoformat()
+    yf_sym = MARKETS[symbol]["yf"]
+    start = (datetime.date.today() - datetime.timedelta(days=365*3+30)).isoformat()
     end = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-
-    print(f"[PRICE] Fetching {yf_sym}...")
     try:
         df = yf.Ticker(yf_sym).history(start=start, end=end, interval="1d")
         if df.empty:
-            print(f"[PRICE] No data for {yf_sym}")
-            _cache[ck] = {}
-            _cache_time[ck] = now
-            return {}
+            _cache[ck] = {}; _cache_time[ck] = now; return {}
         pm = {}
         for idx, row in df.iterrows():
             pm[idx.strftime('%Y-%m-%d')] = round(float(row['Close']), 4)
-        print(f"[PRICE] {yf_sym}: {len(pm)} daily prices")
-        _cache[ck] = pm
-        _cache_time[ck] = now
-        return pm
+        _cache[ck] = pm; _cache_time[ck] = now; return pm
     except Exception as e:
-        print(f"[PRICE] Error {yf_sym}: {e}")
-        _cache[ck] = {}
-        _cache_time[ck] = now
-        return {}
-
+        print("[PRICE] Error " + yf_sym + ": " + str(e))
+        _cache[ck] = {}; _cache_time[ck] = now; return {}
 
 def align_prices(symbol, cot_dates):
-    """For each COT date, find closest prior trading day close."""
     pm = load_price_map(symbol)
-    if not pm: return [None] * len(cot_dates)
+    if not pm: return [None]*len(cot_dates)
     result = []
     for cd in cot_dates:
         dt = datetime.date.fromisoformat(cd)
         found = None
         for off in range(7):
             check = (dt - datetime.timedelta(days=off)).isoformat()
-            if check in pm:
-                found = pm[check]
-                break
+            if check in pm: found = pm[check]; break
         result.append(found)
     return result
 
-
-# ─── ENDPOINTS ──────────────────────────────────────────
+def get_daily_prices(symbol, start_date, end_date):
+    pm = load_price_map(symbol)
+    if not pm: return [], []
+    dates = sorted([d for d in pm.keys() if start_date <= d <= end_date])
+    return dates, [pm[d] for d in dates]
 
 @app.route('/')
 def index():
-    return jsonify({'service': 'Vilasio COT API', 'version': '3.2'})
+    return jsonify({'service': 'Vilasio COT API', 'version': '3.3'})
 
 @app.route('/health')
 def health():
     data = load_all_data()
-    return jsonify({'status': 'ok', 'version': '3.2',
-        'markets': sorted(data.keys()) if data else [],
-        'totalRows': sum(len(v) for v in data.values()) if data else 0})
+    return jsonify({'status': 'ok', 'version': '3.3', 'markets': sorted(data.keys()) if data else [], 'totalRows': sum(len(v) for v in data.values()) if data else 0})
 
 @app.route('/api/cot')
 def api_cot():
     market = request.args.get('market', '').upper()
     weeks = max(4, min(int(request.args.get('weeks', 52)), 260))
-    if market not in MARKETS:
-        return jsonify({'error': f'Unknown: {market}', 'available': sorted(MARKETS.keys())}), 400
+    if market not in MARKETS: return jsonify({'error': 'Unknown: ' + market}), 400
     data = load_all_data()
-    if market not in data or not data[market]:
-        return jsonify({'error': f'No data for {market}'}), 404
+    if market not in data or not data[market]: return jsonify({'error': 'No data for ' + market}), 404
     entries = data[market]
-    entries = entries[-(weeks + 1):] if len(entries) > weeks + 1 else entries
+    entries = entries[-(weeks+1):] if len(entries) > weeks+1 else entries
     cfg = MARKETS[market]
     dates = [e['date'] for e in entries]
-
-    # Price overlay
+    try: prices = align_prices(market, dates)
+    except: prices = [None]*len(entries)
+    dd, dp = [], []
     try:
-        prices = align_prices(market, dates)
-    except Exception as e:
-        print(f"[PRICE] align error {market}: {e}")
-        prices = [None] * len(entries)
-
+        end_dt = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        dd, dp = get_daily_prices(market, dates[0], end_dt)
+    except: pass
     return jsonify({
         'market': market, 'name': cfg['name'], 'exchange': cfg['exchange'], 'cat': cfg['cat'],
-        'reportDate': entries[-1]['date'],
-        'labels': dates,
-        'bpLong': [e['bpLong'] for e in entries],
-        'bpShort': [e['bpShort'] for e in entries],
-        'bpNet': [e['bpNet'] for e in entries],
-        'dlLong': [e['dlLong'] for e in entries],
-        'dlShort': [e['dlShort'] for e in entries],
-        'dlNet': [e['dlNet'] for e in entries],
-        'oi': [e['oi'] for e in entries],
-        'price': prices,
+        'reportDate': entries[-1]['date'], 'labels': dates,
+        'bpLong': [e['bpLong'] for e in entries], 'bpShort': [e['bpShort'] for e in entries],
+        'bpNet': [e['bpNet'] for e in entries], 'dlLong': [e['dlLong'] for e in entries],
+        'dlShort': [e['dlShort'] for e in entries], 'dlNet': [e['dlNet'] for e in entries],
+        'oi': [e['oi'] for e in entries], 'price': prices,
+        'dailyDates': dd, 'dailyPrice': dp,
     })
 
 @app.route('/api/cot/summary')
@@ -222,29 +165,13 @@ def api_cot_summary():
     for sym in sorted(MARKETS.keys()):
         if sym not in data or len(data[sym]) < 2: continue
         last, prev = data[sym][-1], data[sym][-2]
-        results.append({'market': sym, 'name': MARKETS[sym]['name'], 'cat': MARKETS[sym]['cat'],
-            'bpNet': last['bpNet'], 'bpNetChg': last['bpNet'] - prev['bpNet'],
-            'dlNet': last['dlNet'], 'oi': last['oi'], 'reportDate': last['date']})
+        results.append({'market': sym, 'name': MARKETS[sym]['name'], 'bpNet': last['bpNet'], 'bpNetChg': last['bpNet']-prev['bpNet'], 'dlNet': last['dlNet'], 'oi': last['oi'], 'reportDate': last['date']})
     return jsonify({'markets': results})
 
 @app.route('/api/cot/refresh')
 def api_refresh():
-    _cache.clear()
-    _cache_time.clear()
-    data = load_all_data()
+    _cache.clear(); _cache_time.clear(); data = load_all_data()
     return jsonify({'status': 'refreshed', 'markets': sorted(data.keys())})
-
-@app.route('/debug/raw/<symbol>')
-def debug_raw(symbol):
-    symbol = symbol.upper()
-    if symbol not in MARKETS:
-        return jsonify({'error': 'Unknown'}), 400
-    cfg = MARKETS[symbol]
-    params = {'$where': f"contract_market_name='{cfg['cftc_name']}'",
-              '$order': 'report_date_as_yyyy_mm_dd DESC', '$limit': '2'}
-    rows = fetch_json(LEGACY_API, params)
-    return jsonify({'symbol': symbol, 'cftc_name': cfg['cftc_name'], 'yf': cfg['yf'], 'rows': rows})
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
