@@ -251,12 +251,14 @@ def api_cot_summary():
 @app.route('/api/cot/flow')
 def api_flow():
     data = load_all_data()
+    weeks = max(1, min(int(request.args.get('weeks', 1)), 52))
     cats = {}
     for cat in FLOW_CATS:
         cats[cat] = {'bpNetChg': 0, 'dlNetChg': 0, 'oiChg': 0, 'markets': []}
     for sym in sorted(MARKETS.keys()):
-        if sym not in data or len(data[sym]) < 2: continue
-        last, prev = data[sym][-1], data[sym][-2]
+        if sym not in data or len(data[sym]) < weeks + 1: continue
+        last = data[sym][-1]
+        prev = data[sym][-(weeks + 1)]
         cat = MARKETS[sym]['cat']
         if cat not in cats: continue
         bpChg = last['bpNet'] - prev['bpNet']
