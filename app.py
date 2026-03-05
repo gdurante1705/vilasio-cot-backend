@@ -404,22 +404,23 @@ def fetch_polymarket_sentiment():
     # bearish_keywords: if question contains these, yes_prob is BEARISH (score goes down)
     # If neither, skip (ambiguous multi-outcome sub-market)
     MACRO_EVENTS = [
-        # Fed cuts — more cuts = bullish (dovish Fed supports markets)
+        # Fed cuts — more cuts = bullish
         ('how-many-fed-rate-cuts-in-2026',    ['2 ', '3 ', '4 ', '5 ', '6 ', '7 ', '8 ', '9 ', '10', '11', '12'], ['0 ', 'no ']),
         ('how-many-fed-rate-cuts-in-2025',    ['2 ', '3 ', '4 ', '5 ', '6 '], ['0 ', 'no ']),
         ('fed-rate-cut-by-629',               ['yes', 'cut'], ['no ', 'pause']),
         ('fed-decision-march-2026',           ['cut', '25bps', '50bps'], ['pause', 'hike', 'increase']),
         ('fed-decision-in-march',             ['cut', '25bps', '50bps'], ['pause', 'hike', 'no change']),
         ('fed-rate-cut-march-2026',           ['yes', 'cut'], ['no', 'pause']),
-        # Recession — recession = bearish (score inverted)
-        ('us-recession-in-2026',              [], ['yes', 'recession']),
+        # Recession — any "recession" or "yes" in question = bearish outcome
+        ('us-recession-in-2026',              [], ['yes', 'recession', 'will']),
         ('will-the-us-enter-a-recession-in-2025', [], ['yes']),
         ('will-there-be-a-us-recession-in-2026',  [], ['yes']),
         ('us-recession-2025',                 [], ['yes']),
         ('us-recession-2026',                 [], ['yes']),
         ('recession-in-2026',                 [], ['yes']),
         ('will-there-be-a-us-recession',      [], ['yes']),
-        ('us-recession-by-end-of-2026',       [], ['yes']),
+        ('us-recession-by-end-of-2026',       [], ['yes', 'recession', 'end of 2026']),
+        ('us-enter-recession-2026',           [], ['yes']),
         # S&P 500
         ('sp-500-end-of-year-2025',           ['above', '6000', '6500', '7000'], ['below', '4000', '4500', '5000']),
         ('sp-500-in-2026',                    ['above', '6000', '6500', '7000'], ['below', '4000', '4500', '5000']),
@@ -428,9 +429,12 @@ def fetch_polymarket_sentiment():
         ('will-the-sp-500-hit-6000',          ['yes'], ['no']),
         ('will-the-sp-500-hit-7000',          ['yes'], ['no']),
         ('sp-500-year-end-2025',              ['above', '6000', '6500'], ['below', '4000', '4500']),
-        # CPI — lower inflation = bullish
+        ('will-sp-500-hit-6000-in-2026',      ['yes'], ['no']),
+        ('sp-500-2026',                       ['above', '6000', '6500'], ['below', '4000', '4500']),
+        # CPI
         ('us-cpi-inflation-in-2026',          [], ['above', 'higher', 'exceed']),
         ('us-cpi-2026',                       [], ['above', 'higher']),
+        ('will-us-cpi-exceed',                [], ['yes', 'exceed', 'above']),
     ]
 
     events_base = 'https://gamma-api.polymarket.com/events'
@@ -481,17 +485,23 @@ def fetch_polymarket_sentiment():
                 # For binary events (1 market): direct yes/no classification
                 if len(active) == 1:
                     m = active[0]
-                    q = m['question'].lower()
-                    is_bullish = any(kw in q for kw in bullish_kw)
-                    is_bearish = any(kw in q for kw in bearish_kw)
+                    q = (m['question'] + ' ' + event_title).lower()
+                    is_bullish = any(kw.lower() in q for kw in bullish_kw)
+                    is_bearish = any(kw.lower() in q for kw in bearish_kw)
+                    # For recession-type slugs: event itself is the bearish signal
+                    if not is_bullish and not is_bearish:
+                        if 'recession' in (slug + ' ' + event_title).lower():
+                            is_bearish = True
+                        elif 'rate cut' in (slug + ' ' + event_title).lower() or 'fed cut' in (slug + ' ' + event_title).lower():
+                            is_bullish = True
                     if is_bullish:
                         event_score = m['yesProb'] * 100
                     elif is_bearish:
                         event_score = (1 - m['yesProb']) * 100
                     else:
-                        event_score = 50  # neutral if can't classify
+                        event_score = 50
                     display_prob = round(m['yesProb'] * 100, 1)
-                    display_q = m['question']
+                    display_q = m['question'] if m['question'] else event_title
                 else:
                     # Multi-outcome: sum yesProb of bullish outcomes, subtract bearish
                     bullish_prob = 0.0
