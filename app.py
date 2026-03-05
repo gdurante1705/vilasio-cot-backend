@@ -391,37 +391,48 @@ def fetch_pcr():
     return result
 
 def fetch_polymarket_sentiment():
-    """Fetch macro/equity markets from Polymarket Gamma API using economy tag. Cache 1h."""
+    """Fetch macro markets from Polymarket using known event slugs. Cache 1h."""
     ck = 'polymarket_sentiment'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
         return _cache[ck]
 
     today = datetime.date.today().isoformat()
-    collected = {}
 
-    # Strategy 1: fetch events tagged as economy/economic-policy by tag slug
-    # Polymarket tags: economy, economic-policy, federal-reserve, interest-rates
-    tag_slugs = ['economy', 'economic-policy', 'federal-reserve', 'interest-rates', 'us-economy']
+    # Known macro/equity event slugs on Polymarket — these are stable, high-volume markets
+    # We fetch via /events?slug= which returns the event with all its markets
+    MACRO_SLUGS = [
+        'how-many-fed-rate-cuts-in-2026',
+        'us-recession-in-2026',
+        'fed-rate-cut-by-629',
+        'will-the-us-enter-a-recession-in-2025',
+        'how-many-fed-rate-cuts-in-2025',
+        'us-recession-2025',
+        'fed-pause-or-cut-in-march-2026',
+        'sp-500-end-of-year-2025',
+        'sp-500-in-2026',
+        'will-the-sp-500-go-up-in-q1-2026',
+        'will-there-be-a-us-recession-in-2026',
+        'us-cpi-inflation-in-2026',
+    ]
+
+    collected = {}
     events_base = 'https://gamma-api.polymarket.com/events'
-    for tag in tag_slugs:
+
+    for slug in MACRO_SLUGS:
         try:
-            params = urllib.parse.urlencode({
-                'tag': tag,
-                'active': 'true',
-                'closed': 'false',
-                'limit': '20',
-                'order': 'volumeNum',
-                'ascending': 'false'
-            })
+            params = urllib.parse.urlencode({'slug': slug})
             req = urllib.request.Request(
                 events_base + '?' + params,
                 headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'}
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                events = json.loads(resp.read().decode('utf-8'))
-            if not isinstance(events, list): continue
+                data = json.loads(resp.read().decode('utf-8'))
+
+            # Response can be a list or single object
+            events = data if isinstance(data, list) else [data]
             for ev in events:
+                if not ev or not isinstance(ev, dict): continue
                 markets = ev.get('markets', [])
                 for m in markets:
                     cid = m.get('conditionId') or m.get('id', '')
@@ -436,26 +447,29 @@ def fetch_polymarket_sentiment():
                     except: yes_prob = None
                     if yes_prob is None: continue
                     volume = float(m.get('volumeNum', m.get('volume', 0)) or 0)
-                    if volume < 50000: continue
+                    question = m.get('question', ev.get('title', slug))
                     collected[cid] = {
                         'id': cid,
-                        'question': m.get('question', ev.get('title', '')),
+                        'question': question,
                         'yesProb': yes_prob,
                         'volume': volume,
                         'endDate': end_date[:10] if end_date else ''
                     }
         except Exception as e:
-            print('[POLYMARKET] tag "' + tag + '" error: ' + str(e))
+            print('[POLYMARKET] slug "' + slug + '" error: ' + str(e))
 
-    # Strategy 2: fallback — search specific macro keywords if not enough results
-    if len(collected) < 5:
-        macro_terms = ['recession 2026', 'fed rate cut 2026', 'US recession', 'federal reserve 2026', 'S&P 500 end 2025']
+    # Fallback: if slugs returned nothing, try /markets with strict keyword + blocklist
+    if len(collected) < 3:
+        print('[POLYMARKET] slug strategy returned < 3 markets, falling back to search')
+        blocklist = ['gta', 'bitcoin', 'btc', 'crypto', 'nba', 'nfl', 'kardashian',
+                     'carti', 'rihanna', 'taylor', 'drake', 'oscar', 'grammy', 'jesus',
+                     'christ', 'lebron', 'oprah', 'clinton', 'walz', '2028', 'chelsea']
+        macro_terms = ['US recession 2026', 'fed rate cut 2026', 'S&P 500 2026', 'CPI inflation 2026']
         markets_base = 'https://gamma-api.polymarket.com/markets'
         for term in macro_terms:
             try:
                 params = urllib.parse.urlencode({
-                    'q': term, 'active': 'true', 'closed': 'false',
-                    'limit': '8', 'order': 'volumeNum', 'ascending': 'false'
+                    'q': term, 'active': 'true', 'closed': 'false', 'limit': '10'
                 })
                 req = urllib.request.Request(
                     markets_base + '?' + params,
@@ -470,6 +484,8 @@ def fetch_polymarket_sentiment():
                     if m.get('closed') or m.get('archived'): continue
                     end_date = m.get('endDate', '') or ''
                     if end_date and end_date[:10] < today: continue
+                    q = m.get('question', '').lower()
+                    if any(w in q for w in blocklist): continue
                     raw_prices = m.get('outcomePrices', '[]')
                     try:
                         prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
@@ -478,27 +494,16 @@ def fetch_polymarket_sentiment():
                     if yes_prob is None: continue
                     volume = float(m.get('volumeNum', m.get('volume', 0)) or 0)
                     if volume < 50000: continue
-                    # Filter out obvious non-macro markets
-                    q = m.get('question', '').lower()
-                    skip_words = ['gta', 'bitcoin', 'crypto', 'nba', 'nfl', 'kardashian',
-                                  'carti', 'rihanna', 'taylor', 'drake', 'oscar', 'grammy']
-                    if any(w in q for w in skip_words): continue
                     collected[cid] = {
-                        'id': cid,
-                        'question': m.get('question', ''),
-                        'yesProb': yes_prob,
-                        'volume': volume,
+                        'id': cid, 'question': m.get('question', ''),
+                        'yesProb': yes_prob, 'volume': volume,
                         'endDate': end_date[:10] if end_date else ''
                     }
             except Exception as e:
-                print('[POLYMARKET] fallback term "' + term + '" error: ' + str(e))
+                print('[POLYMARKET] fallback "' + term + '" error: ' + str(e))
 
     markets_list = sorted(collected.values(), key=lambda x: -x['volume'])[:12]
-
-    if markets_list:
-        avg_prob = round(sum(m['yesProb'] for m in markets_list) / len(markets_list), 1)
-    else:
-        avg_prob = None
+    avg_prob = round(sum(m['yesProb'] for m in markets_list) / len(markets_list), 1) if markets_list else None
 
     result = {'markets': markets_list, 'avgProb': avg_prob, 'count': len(markets_list)}
     _cache[ck] = result; _cache_time[ck] = now
