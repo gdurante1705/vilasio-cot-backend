@@ -514,7 +514,7 @@ PCR_SYMBOL_URLS = {
 def _parse_cboe_csv(url):
     req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
     with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = resp.read().decode('utf-8')
+        raw = resp.read().decode('latin-1')
     rows = []
     header_found = False
     for line in raw.splitlines():
