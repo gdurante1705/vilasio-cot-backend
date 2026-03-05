@@ -391,69 +391,107 @@ def fetch_pcr():
     return result
 
 def fetch_polymarket_sentiment():
-    """Fetch macro/equity markets from Polymarket Gamma API. Cache 1h."""
+    """Fetch macro/equity markets from Polymarket Gamma API using economy tag. Cache 1h."""
     ck = 'polymarket_sentiment'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
         return _cache[ck]
 
     today = datetime.date.today().isoformat()
-
-    # Queries targeting macro USA + equity S&P markets
-    search_terms = [
-        'fed rate cut 2025', 'fed rate cut 2026', 'recession 2025', 'recession 2026',
-        'S&P 500 2025', 'S&P 500 2026', 'federal reserve 2025', 'rate cut 2026'
-    ]
     collected = {}
-    base = 'https://gamma-api.polymarket.com/markets'
-    for term in search_terms:
+
+    # Strategy 1: fetch events tagged as economy/economic-policy by tag slug
+    # Polymarket tags: economy, economic-policy, federal-reserve, interest-rates
+    tag_slugs = ['economy', 'economic-policy', 'federal-reserve', 'interest-rates', 'us-economy']
+    events_base = 'https://gamma-api.polymarket.com/events'
+    for tag in tag_slugs:
         try:
             params = urllib.parse.urlencode({
-                'q': term,
+                'tag': tag,
                 'active': 'true',
                 'closed': 'false',
-                'limit': '15'
+                'limit': '20',
+                'order': 'volumeNum',
+                'ascending': 'false'
             })
             req = urllib.request.Request(
-                base + '?' + params,
+                events_base + '?' + params,
                 headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'}
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                markets = json.loads(resp.read().decode('utf-8'))
-            if not isinstance(markets, list): continue
-            for m in markets:
-                cid = m.get('conditionId') or m.get('id', '')
-                if not cid or cid in collected: continue
-
-                # Skip resolved/closed markets
-                if m.get('closed') or m.get('archived'): continue
-
-                # Skip markets with past end dates
-                end_date = m.get('endDate', '') or ''
-                if end_date:
-                    end_str = end_date[:10]
-                    if end_str < today: continue
-
-                # outcome prices: JSON string like "[0.72, 0.28]"
-                raw_prices = m.get('outcomePrices', '[]')
-                try:
-                    prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
-                    yes_prob = round(float(prices[0]) * 100, 1) if prices else None
-                except: yes_prob = None
-                if yes_prob is None: continue
-
-                volume = float(m.get('volumeNum', m.get('volume', 0)) or 0)
-                if volume < 10000: continue  # skip low-liquidity markets
-
-                collected[cid] = {
-                    'id': cid,
-                    'question': m.get('question', m.get('title', '')),
-                    'yesProb': yes_prob,
-                    'volume': volume,
-                    'endDate': end_date[:10] if end_date else ''
-                }
+                events = json.loads(resp.read().decode('utf-8'))
+            if not isinstance(events, list): continue
+            for ev in events:
+                markets = ev.get('markets', [])
+                for m in markets:
+                    cid = m.get('conditionId') or m.get('id', '')
+                    if not cid or cid in collected: continue
+                    if m.get('closed') or m.get('archived'): continue
+                    end_date = m.get('endDate', '') or ''
+                    if end_date and end_date[:10] < today: continue
+                    raw_prices = m.get('outcomePrices', '[]')
+                    try:
+                        prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                        yes_prob = round(float(prices[0]) * 100, 1) if prices else None
+                    except: yes_prob = None
+                    if yes_prob is None: continue
+                    volume = float(m.get('volumeNum', m.get('volume', 0)) or 0)
+                    if volume < 50000: continue
+                    collected[cid] = {
+                        'id': cid,
+                        'question': m.get('question', ev.get('title', '')),
+                        'yesProb': yes_prob,
+                        'volume': volume,
+                        'endDate': end_date[:10] if end_date else ''
+                    }
         except Exception as e:
-            print('[POLYMARKET] term "' + term + '" error: ' + str(e))
+            print('[POLYMARKET] tag "' + tag + '" error: ' + str(e))
+
+    # Strategy 2: fallback — search specific macro keywords if not enough results
+    if len(collected) < 5:
+        macro_terms = ['recession 2026', 'fed rate cut 2026', 'US recession', 'federal reserve 2026', 'S&P 500 end 2025']
+        markets_base = 'https://gamma-api.polymarket.com/markets'
+        for term in macro_terms:
+            try:
+                params = urllib.parse.urlencode({
+                    'q': term, 'active': 'true', 'closed': 'false',
+                    'limit': '8', 'order': 'volumeNum', 'ascending': 'false'
+                })
+                req = urllib.request.Request(
+                    markets_base + '?' + params,
+                    headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    markets = json.loads(resp.read().decode('utf-8'))
+                if not isinstance(markets, list): continue
+                for m in markets:
+                    cid = m.get('conditionId') or m.get('id', '')
+                    if not cid or cid in collected: continue
+                    if m.get('closed') or m.get('archived'): continue
+                    end_date = m.get('endDate', '') or ''
+                    if end_date and end_date[:10] < today: continue
+                    raw_prices = m.get('outcomePrices', '[]')
+                    try:
+                        prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                        yes_prob = round(float(prices[0]) * 100, 1) if prices else None
+                    except: yes_prob = None
+                    if yes_prob is None: continue
+                    volume = float(m.get('volumeNum', m.get('volume', 0)) or 0)
+                    if volume < 50000: continue
+                    # Filter out obvious non-macro markets
+                    q = m.get('question', '').lower()
+                    skip_words = ['gta', 'bitcoin', 'crypto', 'nba', 'nfl', 'kardashian',
+                                  'carti', 'rihanna', 'taylor', 'drake', 'oscar', 'grammy']
+                    if any(w in q for w in skip_words): continue
+                    collected[cid] = {
+                        'id': cid,
+                        'question': m.get('question', ''),
+                        'yesProb': yes_prob,
+                        'volume': volume,
+                        'endDate': end_date[:10] if end_date else ''
+                    }
+            except Exception as e:
+                print('[POLYMARKET] fallback term "' + term + '" error: ' + str(e))
 
     markets_list = sorted(collected.values(), key=lambda x: -x['volume'])[:12]
 
