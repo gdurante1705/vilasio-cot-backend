@@ -343,53 +343,6 @@ def api_refresh():
 
 # ─── SENTIMENT ENDPOINTS ──────────────────────────────────────────────────────
 
-def fetch_pcr():
-    """Fetch CBOE equity put/call ratio from public CSV. Cache 6h.
-    CSV format (after header junk):
-      DATE,CALL,PUT,TOTAL,P/C Ratio
-    We skip all lines until we find a header with 'P/C' then parse data rows.
-    """
-    ck = 'pcr_data'
-    now = datetime.datetime.now()
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
-        return _cache[ck]
-    url = 'https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/equitypc.csv'
-    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = resp.read().decode('utf-8')
-    rows = []
-    header_found = False
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line: continue
-        # Detect the data header row
-        if not header_found:
-            if 'DATE' in line.upper() and ('P/C' in line.upper() or 'PUT' in line.upper()):
-                header_found = True
-            continue
-        parts = [p.strip() for p in line.split(',')]
-        if len(parts) < 4: continue
-        date_str = parts[0]
-        pc_str = parts[4] if len(parts) >= 5 else parts[3]
-        try:
-            # Accept MM/DD/YYYY or YYYY-MM-DD
-            for fmt in ('%m/%d/%Y', '%Y-%m-%d'):
-                try:
-                    datetime.datetime.strptime(date_str, fmt); break
-                except: pass
-            else:
-                continue
-            val = float(pc_str)
-            if val <= 0 or val > 10: continue  # sanity check — PCR is always 0.3–2.0
-            rows.append({'date': date_str, 'pcr': val})
-        except: continue
-    rows = rows[-30:]  # last 30 trading days
-    last_pcr = rows[-1]['pcr'] if rows else None
-    avg10 = round(sum(r['pcr'] for r in rows[-10:]) / min(10, len(rows)), 3) if rows else None
-    result = {'latest': last_pcr, 'avg10': avg10, 'history': rows}
-    _cache[ck] = result; _cache_time[ck] = now
-    return result
-
 def fetch_polymarket_sentiment():
     """Fetch macro markets from Polymarket using known event slugs. Cache 1h."""
     ck = 'polymarket_sentiment'
@@ -552,71 +505,401 @@ def fetch_polymarket_sentiment():
     _cache[ck] = result; _cache_time[ck] = now
     return result
 
-@app.route('/api/sentiment/pcr')
-def api_pcr():
+# ── CBOE per-symbol PCR CSVs (SPX, QQQ proxy for NQ) ─────────────────────────
+PCR_SYMBOL_URLS = {
+    'SPX': 'https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/spxpc.csv',
+    'EQUITY': 'https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/equitypc.csv',
+}
+
+def _parse_cboe_csv(url):
+    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode('utf-8')
+    rows = []
+    header_found = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line: continue
+        if not header_found:
+            if 'DATE' in line.upper() and ('P/C' in line.upper() or 'PUT' in line.upper()):
+                header_found = True
+            continue
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) < 4: continue
+        date_str = parts[0]
+        pc_str = parts[4] if len(parts) >= 5 else parts[3]
+        try:
+            for fmt in ('%m/%d/%Y', '%Y-%m-%d'):
+                try: datetime.datetime.strptime(date_str, fmt); break
+                except: pass
+            else: continue
+            val = float(pc_str)
+            if val <= 0 or val > 10: continue
+            rows.append({'date': date_str, 'pcr': val})
+        except: continue
+    return rows[-30:]
+
+def fetch_pcr_symbol(symbol):
+    ck = 'pcr_' + symbol
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = PCR_SYMBOL_URLS.get(symbol)
+    if not url: return None
+    rows = _parse_cboe_csv(url)
+    if not rows: return None
+    latest = rows[-1]['pcr']
+    avg10 = round(sum(r['pcr'] for r in rows[-10:]) / min(10, len(rows)), 3)
+    result = {'latest': latest, 'avg10': avg10, 'history': rows}
+    _cache[ck] = result; _cache_time[ck] = now
+    return result
+
+def pcr_to_score(avg10, lo=0.4, hi=1.4):
+    """Map PCR avg10 to 0-100 bullish score. Lower PCR = more bullish."""
+    if avg10 is None: return None
+    return round(max(0, min(100, (hi - avg10) / (hi - lo) * 100)), 1)
+
+def fetch_pcr():
+    return fetch_pcr_symbol('EQUITY')
+
+# ── BLS API — macro release trend ────────────────────────────────────────────
+BLS_SERIES = {
+    'CPI':     'CUUR0000SA0',   # CPI-U All items NSA
+    'NFP':     'CES0000000001', # Total nonfarm payroll (thousands)
+    'ICSA':    'ICSA',          # Initial claims SA (weekly, via BLS)
+    'CCSA':    'CCSA',          # Continued claims SA
+    'UNRATE':  'LNS14000000',   # Unemployment rate
+}
+
+def fetch_bls_series(series_id, n=13):
+    """Fetch last n observations from BLS v1 API (no key needed)."""
+    ck = 'bls_' + series_id
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = 'https://api.bls.gov/publicAPI/v1/timeseries/data/' + series_id
+    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    series_data = data.get('Results', {}).get('series', [{}])[0].get('data', [])
+    # BLS returns newest first — reverse for chronological order
+    series_data = list(reversed(series_data[:n]))
+    result = [{'period': d['year'] + '-' + d['period'], 'value': float(d['value'].replace(',',''))} for d in series_data if d.get('value') not in ('', '-')]
+    _cache[ck] = result; _cache_time[ck] = now
+    return result
+
+def macro_trend_score(observations, direction='neutral'):
+    """
+    Compute 0-100 bullish score from recent trend.
+    direction: 'up_bullish' (NFP, good when rising),
+               'down_bullish' (CPI, ICSA, good when falling),
+               'neutral'
+    Uses: is latest above/below 6m average, and momentum of last 3 readings.
+    """
+    if not observations or len(observations) < 3: return None
+    vals = [o['value'] for o in observations]
+    latest = vals[-1]
+    avg6 = sum(vals[-7:-1]) / min(6, len(vals)-1) if len(vals) > 1 else latest
+    # Momentum: slope of last 3
+    last3 = vals[-3:]
+    slope = (last3[-1] - last3[0]) / max(abs(last3[0]), 1) * 100  # % change
+
+    if direction == 'up_bullish':
+        # Higher = bullish: latest vs avg, slope up = good
+        pos_vs_avg = 1 if latest > avg6 else 0
+        pos_slope = 1 if slope > 0 else 0
+        score = (pos_vs_avg * 40 + pos_slope * 30 + 30)  # base 30, up to 100
+        # Scale by magnitude
+        pct = (latest - avg6) / max(abs(avg6), 1) * 100
+        score = min(100, max(0, 50 + pct * 2 + (10 if slope > 0 else -10)))
+    elif direction == 'down_bullish':
+        # Lower = bullish
+        pct = (avg6 - latest) / max(abs(avg6), 1) * 100  # positive when falling
+        score = min(100, max(0, 50 + pct * 2 + (-10 if slope > 0 else 10)))
+    else:
+        score = 50
+    return round(score, 1)
+
+# ── Polymarket asset slugs ────────────────────────────────────────────────────
+ASSET_POLY_SLUGS = {
+    'CL': [('will-wti-crude-oil-hit-80-in-2026', ['yes'], ['no']),
+           ('will-wti-crude-oil-hit-100-in-2026', ['yes'], ['no']),
+           ('oil-price-2026', ['above', '80', '100'], ['below', '50', '60'])],
+    'GC': [('will-gold-hit-3000-in-2025', ['yes'], ['no']),
+           ('will-gold-hit-3500-in-2025', ['yes'], ['no']),
+           ('will-gold-hit-3000', ['yes'], ['no']),
+           ('gold-price-2026', ['above', '3000', '3500'], ['below', '2000', '2500'])],
+    '6E': [('eurusd-2026', ['above', 'higher', '1.10', '1.15'], ['below', 'lower', '0.95', '1.00']),
+           ('will-eurusd-hit-110', ['yes'], ['no'])],
+    '6B': [('gbpusd-2026', ['above', 'higher'], ['below', 'lower']),
+           ('will-gbpusd-hit-130', ['yes'], ['no'])],
+    'DX': [('will-dxy-hit-110', ['yes'], ['no']),
+           ('usd-index-2026', ['above', 'stronger'], ['below', 'weaker'])],
+}
+
+MACRO_POLY_SLUGS = [
+    ('how-many-fed-rate-cuts-in-2026',    ['2 ', '3 ', '4 ', '5 ', '6 ', '7 ', '8 ', '9 ', '10', '11', '12'], ['0 ', 'no ']),
+    ('how-many-fed-rate-cuts-in-2025',    ['2 ', '3 ', '4 ', '5 ', '6 '], ['0 ', 'no ']),
+    ('fed-rate-cut-by-629',               ['yes', 'cut'], ['no ', 'pause']),
+    ('us-recession-by-end-of-2026',       [], ['yes', 'recession']),
+    ('us-recession-in-2026',              [], ['yes', 'recession']),
+    ('will-the-us-enter-a-recession-in-2025', [], ['yes']),
+]
+
+def _poly_fetch_slug(slug, bullish_kw, bearish_kw, today):
+    """Fetch one Polymarket event slug and return (score, volume, title, display_prob) or None."""
     try:
-        data = fetch_pcr()
-        return jsonify({'status': 'ok', **data})
+        params = urllib.parse.urlencode({'slug': slug})
+        req = urllib.request.Request(
+            'https://gamma-api.polymarket.com/events?' + params,
+            headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        events = data if isinstance(data, list) else [data]
+        for ev in events:
+            if not ev or not isinstance(ev, dict): continue
+            markets = ev.get('markets', [])
+            if not markets: continue
+            event_title = ev.get('title', slug)
+            total_vol = sum(float(m.get('volumeNum', 0) or 0) for m in markets)
+            if total_vol < 5000: continue
+            active = []
+            for m in markets:
+                if m.get('closed') or m.get('archived'): continue
+                end_date = (m.get('endDate', '') or '')[:10]
+                if end_date and end_date < today: continue
+                raw_prices = m.get('outcomePrices', '[]')
+                try:
+                    prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                    yp = float(prices[0]) if prices else None
+                except: yp = None
+                if yp is None: continue
+                active.append({'question': m.get('question',''), 'yesProb': yp, 'volume': float(m.get('volumeNum',0) or 0)})
+            if not active: continue
+            if len(active) == 1:
+                m = active[0]
+                q = (m['question'] + ' ' + event_title + ' ' + slug).lower()
+                is_bull = any(kw.lower() in q for kw in bullish_kw)
+                is_bear = any(kw.lower() in q for kw in bearish_kw)
+                if not is_bull and not is_bear:
+                    is_bear = 'recession' in q
+                score = (m['yesProb']*100 if is_bull else (1-m['yesProb'])*100 if is_bear else 50)
+                return (score, total_vol, event_title, round(m['yesProb']*100,1))
+            else:
+                bp = sum(m['yesProb'] for m in active if any(kw.lower() in m['question'].lower() for kw in bullish_kw))
+                brp = sum(m['yesProb'] for m in active if any(kw.lower() in m['question'].lower() for kw in bearish_kw))
+                if bp == 0 and brp == 0: continue
+                score = min(100, bp*100) if bp > 0 else max(0, (1-brp)*100)
+                best = max(active, key=lambda x: x['volume'])
+                return (score, total_vol, event_title, round(best['yesProb']*100,1))
     except Exception as e:
-        print('[PCR] Error: ' + str(e))
+        print('[POLY_SLUG] ' + slug + ': ' + str(e))
+    return None
+
+def fetch_asset_sentiment():
+    """Asset-level sentiment: PCR for ES/NQ, Polymarket for CL/GC/6E/6B/DX."""
+    ck = 'asset_sentiment'
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
+        return _cache[ck]
+
+    today = datetime.date.today().isoformat()
+    assets = {}
+
+    # ES — SPX PCR
+    spx = fetch_pcr_symbol('SPX')
+    if spx:
+        score = pcr_to_score(spx['avg10'], lo=0.8, hi=2.5)  # SPX PCR range is higher (index options)
+        assets['ES'] = {'name': 'E-Mini S&P 500', 'score': score, 'source': 'PCR',
+                        'detail': 'SPX PCR 10d avg: ' + str(spx['avg10']), 'cat': 'Indices'}
+
+    # NQ — use equity PCR as proxy (no QQQ-specific CSV from CBOE)
+    eq = fetch_pcr_symbol('EQUITY')
+    if eq:
+        score = pcr_to_score(eq['avg10'])
+        assets['NQ'] = {'name': 'E-Mini Nasdaq', 'score': score, 'source': 'PCR',
+                        'detail': 'Equity PCR 10d avg: ' + str(eq['avg10']), 'cat': 'Indices'}
+
+    # CL, GC, 6E, 6B, DX — Polymarket
+    for sym, slugs in ASSET_POLY_SLUGS.items():
+        name_map = {'CL':'Crude Oil WTI','GC':'Gold','6E':'Euro FX','6B':'British Pound','DX':'US Dollar Index'}
+        cat_map  = {'CL':'Energy','GC':'Metals','6E':'FX','6B':'FX','DX':'FX'}
+        scores, vols = [], []
+        for slug, bkw, brw in slugs:
+            res = _poly_fetch_slug(slug, bkw, brw, today)
+            if res:
+                score, vol, title, _ = res
+                scores.append(score); vols.append(vol)
+        if scores:
+            total_vol = sum(vols)
+            wavg = sum(s*v for s,v in zip(scores,vols)) / max(total_vol, 1)
+            assets[sym] = {'name': name_map.get(sym, sym), 'score': round(wavg, 1),
+                           'source': 'Polymarket', 'detail': str(len(scores)) + ' markets',
+                           'cat': cat_map.get(sym, 'Other')}
+        else:
+            assets[sym] = {'name': name_map.get(sym, sym), 'score': None,
+                           'source': 'N/A', 'detail': 'No data available', 'cat': cat_map.get(sym, 'Other')}
+
+    _cache[ck] = assets; _cache_time[ck] = now
+    return assets
+
+def fetch_macro_sentiment():
+    """Macro releases sentiment: BLS trend + Polymarket Fed."""
+    ck = 'macro_sentiment'
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
+        return _cache[ck]
+
+    today = datetime.date.today().isoformat()
+    macro = {}
+
+    # CPI — lower is bullish
+    try:
+        obs = fetch_bls_series('CUUR0000SA0', n=13)
+        if obs and len(obs) >= 3:
+            # Compute MoM % change for last 6 readings
+            changes = []
+            for i in range(1, len(obs)):
+                prev = obs[i-1]['value']
+                curr = obs[i]['value']
+                if prev: changes.append((curr - prev) / prev * 100)
+            latest_chg = changes[-1] if changes else None
+            avg_chg = sum(changes[-6:]) / min(6, len(changes)) if changes else None
+            score = macro_trend_score(obs, 'down_bullish')
+            macro['CPI'] = {
+                'name': 'CPI Inflation', 'score': score, 'source': 'BLS',
+                'latest': round(obs[-1]['value'], 3),
+                'latestChg': round(latest_chg, 2) if latest_chg else None,
+                'avg6mChg': round(avg_chg, 2) if avg_chg else None,
+                'period': obs[-1]['period'],
+                'detail': 'MoM chg: ' + (str(round(latest_chg,2))+'%' if latest_chg else 'N/A'),
+                'history': [{'period': o['period'], 'value': o['value']} for o in obs[-7:]]
+            }
+    except Exception as e:
+        print('[BLS CPI] ' + str(e))
+        macro['CPI'] = {'name': 'CPI Inflation', 'score': None, 'source': 'BLS', 'detail': 'Error fetching data', 'history': []}
+
+    # NFP — higher is bullish
+    try:
+        obs = fetch_bls_series('CES0000000001', n=13)
+        if obs and len(obs) >= 3:
+            # Convert to monthly change (thousands)
+            changes = [{'period': obs[i]['period'], 'value': obs[i]['value'] - obs[i-1]['value']} for i in range(1, len(obs))]
+            score = macro_trend_score(changes, 'up_bullish')
+            latest_chg = changes[-1]['value'] if changes else None
+            avg_chg = sum(c['value'] for c in changes[-6:]) / min(6, len(changes)) if changes else None
+            macro['NFP'] = {
+                'name': 'Non-Farm Payrolls', 'score': score, 'source': 'BLS',
+                'latest': round(latest_chg, 0) if latest_chg else None,
+                'latestChg': round(latest_chg, 0) if latest_chg else None,
+                'avg6mChg': round(avg_chg, 0) if avg_chg else None,
+                'period': obs[-1]['period'],
+                'detail': 'Monthly add: ' + (str(int(latest_chg))+'K' if latest_chg else 'N/A'),
+                'history': [{'period': c['period'], 'value': c['value']} for c in changes[-6:]]
+            }
+    except Exception as e:
+        print('[BLS NFP] ' + str(e))
+        macro['NFP'] = {'name': 'Non-Farm Payrolls', 'score': None, 'source': 'BLS', 'detail': 'Error fetching data', 'history': []}
+
+    # Initial Jobless Claims — lower is bullish
+    try:
+        obs = fetch_bls_series('ICSA', n=13)
+        if obs and len(obs) >= 3:
+            score = macro_trend_score(obs, 'down_bullish')
+            latest = obs[-1]['value']
+            avg6 = sum(o['value'] for o in obs[-7:-1]) / min(6, len(obs)-1) if len(obs) > 1 else latest
+            macro['ICSA'] = {
+                'name': 'Initial Jobless Claims', 'score': score, 'source': 'BLS',
+                'latest': int(latest),
+                'latestChg': None,
+                'avg6mChg': round(avg6, 0),
+                'period': obs[-1]['period'],
+                'detail': 'Latest: ' + str(int(latest)) + ' · 6w avg: ' + str(int(avg6)),
+                'history': [{'period': o['period'], 'value': o['value']} for o in obs[-7:]]
+            }
+    except Exception as e:
+        print('[BLS ICSA] ' + str(e))
+        macro['ICSA'] = {'name': 'Initial Jobless Claims', 'score': None, 'source': 'BLS', 'detail': 'Error fetching data', 'history': []}
+
+    # Continued Claims — lower is bullish
+    try:
+        obs = fetch_bls_series('CCSA', n=13)
+        if obs and len(obs) >= 3:
+            score = macro_trend_score(obs, 'down_bullish')
+            latest = obs[-1]['value']
+            avg6 = sum(o['value'] for o in obs[-7:-1]) / min(6, len(obs)-1) if len(obs) > 1 else latest
+            macro['CCSA'] = {
+                'name': 'Continued Claims', 'score': score, 'source': 'BLS',
+                'latest': int(latest),
+                'latestChg': None,
+                'avg6mChg': round(avg6, 0),
+                'period': obs[-1]['period'],
+                'detail': 'Latest: ' + str(int(latest)) + ' · 6w avg: ' + str(int(avg6)),
+                'history': [{'period': o['period'], 'value': o['value']} for o in obs[-7:]]
+            }
+    except Exception as e:
+        print('[BLS CCSA] ' + str(e))
+        macro['CCSA'] = {'name': 'Continued Claims', 'score': None, 'source': 'BLS', 'detail': 'Error fetching data', 'history': []}
+
+    # Interest Rates — Polymarket Fed
+    fed_scores, fed_vols = [], []
+    for slug, bkw, brw in MACRO_POLY_SLUGS[:3]:  # only Fed slugs
+        res = _poly_fetch_slug(slug, bkw, brw, today)
+        if res:
+            score, vol, title, _ = res
+            fed_scores.append(score); fed_vols.append(vol)
+    if fed_scores:
+        total_vol = sum(fed_vols)
+        wavg = sum(s*v for s,v in zip(fed_scores,fed_vols)) / max(total_vol,1)
+        macro['RATES'] = {
+            'name': 'Interest Rates (Fed)', 'score': round(wavg,1), 'source': 'Polymarket',
+            'latest': None, 'latestChg': None, 'avg6mChg': None, 'period': '2026',
+            'detail': str(len(fed_scores)) + ' Fed markets',
+            'history': []
+        }
+    else:
+        macro['RATES'] = {'name': 'Interest Rates (Fed)', 'score': None, 'source': 'Polymarket',
+                          'detail': 'No data', 'history': []}
+
+    _cache[ck] = macro; _cache_time[ck] = now
+    return macro
+
+@app.route('/api/sentiment/assets')
+def api_sentiment_assets():
+    try:
+        return jsonify({'status': 'ok', 'assets': fetch_asset_sentiment()})
+    except Exception as e:
+        print('[SENTIMENT_ASSETS] ' + str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/api/sentiment/polymarket')
-def api_polymarket():
+@app.route('/api/sentiment/macro')
+def api_sentiment_macro():
     try:
-        data = fetch_polymarket_sentiment()
-        return jsonify({'status': 'ok', **data})
+        return jsonify({'status': 'ok', 'macro': fetch_macro_sentiment()})
     except Exception as e:
-        print('[POLYMARKET] Error: ' + str(e))
+        print('[SENTIMENT_MACRO] ' + str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/sentiment')
 def api_sentiment():
-    """Combined sentiment endpoint: PCR (50%) + Polymarket (50%) → gauge score 0-100."""
+    """Master sentiment endpoint combining assets + macro."""
     try:
-        pcr_data = fetch_pcr()
-        poly_data = fetch_polymarket_sentiment()
-
-        # PCR score: lower PCR = more bullish
-        # Typical range: 0.4 (extreme bullish) to 1.2 (extreme bearish)
-        # Map to 0-100 score: PCR 0.4 → 100, PCR 1.2 → 0
-        pcr_val = pcr_data.get('avg10')
-        pcr_score = None
-        if pcr_val is not None:
-            pcr_score = round(max(0, min(100, (1.2 - pcr_val) / 0.8 * 100)), 1)
-
-        # Polymarket score: avgProb already 0-100
-        poly_score = poly_data.get('avgProb')
-
-        # Composite: 50/50 average
-        if pcr_score is not None and poly_score is not None:
-            composite = round((pcr_score + poly_score) / 2, 1)
-        elif pcr_score is not None:
-            composite = pcr_score
-        elif poly_score is not None:
-            composite = poly_score
-        else:
-            composite = None
-
-        # Label
+        assets = fetch_asset_sentiment()
+        macro = fetch_macro_sentiment()
+        # Overall score: avg of all available scores
+        all_scores = [v['score'] for v in list(assets.values()) + list(macro.values()) if v.get('score') is not None]
+        composite = round(sum(all_scores) / len(all_scores), 1) if all_scores else None
         if composite is None: label = 'UNAVAILABLE'
         elif composite >= 70: label = 'EXTREME GREED'
         elif composite >= 55: label = 'GREED'
         elif composite >= 45: label = 'NEUTRAL'
         elif composite >= 30: label = 'FEAR'
         else: label = 'EXTREME FEAR'
-
-        return jsonify({
-            'status': 'ok',
-            'composite': composite,
-            'label': label,
-            'components': {
-                'pcr': {'score': pcr_score, 'latest': pcr_data.get('latest'), 'avg10': pcr_val},
-                'polymarket': {'score': poly_score, 'markets': poly_data.get('markets', []), 'count': poly_data.get('count')}
-            }
-        })
+        return jsonify({'status': 'ok', 'composite': composite, 'label': label,
+                        'assets': assets, 'macro': macro})
     except Exception as e:
-        print('[SENTIMENT] Error: ' + str(e))
+        print('[SENTIMENT] ' + str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/markets')
