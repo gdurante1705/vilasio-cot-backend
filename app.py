@@ -344,7 +344,11 @@ def api_refresh():
 # ─── SENTIMENT ENDPOINTS ──────────────────────────────────────────────────────
 
 def fetch_pcr():
-    """Fetch CBOE equity put/call ratio from public CSV. Cache 6h."""
+    """Fetch CBOE equity put/call ratio from public CSV. Cache 6h.
+    CSV format (after header junk):
+      DATE,CALL,PUT,TOTAL,P/C Ratio
+    We skip all lines until we find a header with 'P/C' then parse data rows.
+    """
     ck = 'pcr_data'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
@@ -354,13 +358,29 @@ def fetch_pcr():
     with urllib.request.urlopen(req, timeout=15) as resp:
         raw = resp.read().decode('utf-8')
     rows = []
+    header_found = False
     for line in raw.splitlines():
-        parts = line.strip().split(',')
+        line = line.strip()
+        if not line: continue
+        # Detect the data header row
+        if not header_found:
+            if 'DATE' in line.upper() and ('P/C' in line.upper() or 'PUT' in line.upper()):
+                header_found = True
+            continue
+        parts = [p.strip() for p in line.split(',')]
         if len(parts) < 4: continue
-        date_str, pc_str = parts[0].strip(), parts[3].strip()
+        date_str = parts[0]
+        pc_str = parts[4] if len(parts) >= 5 else parts[3]
         try:
-            datetime.datetime.strptime(date_str, '%m/%d/%Y')
+            # Accept MM/DD/YYYY or YYYY-MM-DD
+            for fmt in ('%m/%d/%Y', '%Y-%m-%d'):
+                try:
+                    datetime.datetime.strptime(date_str, fmt); break
+                except: pass
+            else:
+                continue
             val = float(pc_str)
+            if val <= 0 or val > 10: continue  # sanity check — PCR is always 0.3–2.0
             rows.append({'date': date_str, 'pcr': val})
         except: continue
     rows = rows[-30:]  # last 30 trading days
@@ -377,16 +397,23 @@ def fetch_polymarket_sentiment():
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
         return _cache[ck]
 
+    today = datetime.date.today().isoformat()
+
     # Queries targeting macro USA + equity S&P markets
     search_terms = [
-        'fed rate cut 2025', 'recession 2025', 'S&P 500',
-        'federal reserve', 'inflation', 'rate cut'
+        'fed rate cut 2025', 'fed rate cut 2026', 'recession 2025', 'recession 2026',
+        'S&P 500 2025', 'S&P 500 2026', 'federal reserve 2025', 'rate cut 2026'
     ]
     collected = {}
     base = 'https://gamma-api.polymarket.com/markets'
     for term in search_terms:
         try:
-            params = urllib.parse.urlencode({'q': term, 'active': 'true', 'limit': '10'})
+            params = urllib.parse.urlencode({
+                'q': term,
+                'active': 'true',
+                'closed': 'false',
+                'limit': '15'
+            })
             req = urllib.request.Request(
                 base + '?' + params,
                 headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'}
@@ -397,6 +424,16 @@ def fetch_polymarket_sentiment():
             for m in markets:
                 cid = m.get('conditionId') or m.get('id', '')
                 if not cid or cid in collected: continue
+
+                # Skip resolved/closed markets
+                if m.get('closed') or m.get('archived'): continue
+
+                # Skip markets with past end dates
+                end_date = m.get('endDate', '') or ''
+                if end_date:
+                    end_str = end_date[:10]
+                    if end_str < today: continue
+
                 # outcome prices: JSON string like "[0.72, 0.28]"
                 raw_prices = m.get('outcomePrices', '[]')
                 try:
@@ -404,23 +441,22 @@ def fetch_polymarket_sentiment():
                     yes_prob = round(float(prices[0]) * 100, 1) if prices else None
                 except: yes_prob = None
                 if yes_prob is None: continue
+
                 volume = float(m.get('volumeNum', m.get('volume', 0)) or 0)
-                if volume < 5000: continue  # skip low-liquidity markets
+                if volume < 10000: continue  # skip low-liquidity markets
+
                 collected[cid] = {
                     'id': cid,
                     'question': m.get('question', m.get('title', '')),
                     'yesProb': yes_prob,
                     'volume': volume,
-                    'endDate': m.get('endDate', '')
+                    'endDate': end_date[:10] if end_date else ''
                 }
         except Exception as e:
             print('[POLYMARKET] term "' + term + '" error: ' + str(e))
 
     markets_list = sorted(collected.values(), key=lambda x: -x['volume'])[:12]
 
-    # Compute bullish score: average yes_prob weighted by volume
-    # Markets about rate cuts, no-recession, S&P up = bullish
-    # We use simple average of yes_prob as sentiment proxy
     if markets_list:
         avg_prob = round(sum(m['yesProb'] for m in markets_list) / len(markets_list), 1)
     else:
