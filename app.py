@@ -341,6 +341,162 @@ def api_refresh():
     data = load_all_data()
     return jsonify({'status': 'refreshed', 'markets': sorted(data.keys()), 'count': len(data)})
 
+# ─── SENTIMENT ENDPOINTS ──────────────────────────────────────────────────────
+
+def fetch_pcr():
+    """Fetch CBOE equity put/call ratio from public CSV. Cache 6h."""
+    ck = 'pcr_data'
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = 'https://cdn.cboe.com/resources/options/volume_and_call_put_ratios/equitypc.csv'
+    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode('utf-8')
+    rows = []
+    for line in raw.splitlines():
+        parts = line.strip().split(',')
+        if len(parts) < 4: continue
+        date_str, pc_str = parts[0].strip(), parts[3].strip()
+        try:
+            datetime.datetime.strptime(date_str, '%m/%d/%Y')
+            val = float(pc_str)
+            rows.append({'date': date_str, 'pcr': val})
+        except: continue
+    rows = rows[-30:]  # last 30 trading days
+    last_pcr = rows[-1]['pcr'] if rows else None
+    avg10 = round(sum(r['pcr'] for r in rows[-10:]) / min(10, len(rows)), 3) if rows else None
+    result = {'latest': last_pcr, 'avg10': avg10, 'history': rows}
+    _cache[ck] = result; _cache_time[ck] = now
+    return result
+
+def fetch_polymarket_sentiment():
+    """Fetch macro/equity markets from Polymarket Gamma API. Cache 1h."""
+    ck = 'polymarket_sentiment'
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
+        return _cache[ck]
+
+    # Queries targeting macro USA + equity S&P markets
+    search_terms = [
+        'fed rate cut 2025', 'recession 2025', 'S&P 500',
+        'federal reserve', 'inflation', 'rate cut'
+    ]
+    collected = {}
+    base = 'https://gamma-api.polymarket.com/markets'
+    for term in search_terms:
+        try:
+            params = urllib.parse.urlencode({'q': term, 'active': 'true', 'limit': '10'})
+            req = urllib.request.Request(
+                base + '?' + params,
+                headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                markets = json.loads(resp.read().decode('utf-8'))
+            if not isinstance(markets, list): continue
+            for m in markets:
+                cid = m.get('conditionId') or m.get('id', '')
+                if not cid or cid in collected: continue
+                # outcome prices: JSON string like "[0.72, 0.28]"
+                raw_prices = m.get('outcomePrices', '[]')
+                try:
+                    prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                    yes_prob = round(float(prices[0]) * 100, 1) if prices else None
+                except: yes_prob = None
+                if yes_prob is None: continue
+                volume = float(m.get('volumeNum', m.get('volume', 0)) or 0)
+                if volume < 5000: continue  # skip low-liquidity markets
+                collected[cid] = {
+                    'id': cid,
+                    'question': m.get('question', m.get('title', '')),
+                    'yesProb': yes_prob,
+                    'volume': volume,
+                    'endDate': m.get('endDate', '')
+                }
+        except Exception as e:
+            print('[POLYMARKET] term "' + term + '" error: ' + str(e))
+
+    markets_list = sorted(collected.values(), key=lambda x: -x['volume'])[:12]
+
+    # Compute bullish score: average yes_prob weighted by volume
+    # Markets about rate cuts, no-recession, S&P up = bullish
+    # We use simple average of yes_prob as sentiment proxy
+    if markets_list:
+        avg_prob = round(sum(m['yesProb'] for m in markets_list) / len(markets_list), 1)
+    else:
+        avg_prob = None
+
+    result = {'markets': markets_list, 'avgProb': avg_prob, 'count': len(markets_list)}
+    _cache[ck] = result; _cache_time[ck] = now
+    return result
+
+@app.route('/api/sentiment/pcr')
+def api_pcr():
+    try:
+        data = fetch_pcr()
+        return jsonify({'status': 'ok', **data})
+    except Exception as e:
+        print('[PCR] Error: ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/sentiment/polymarket')
+def api_polymarket():
+    try:
+        data = fetch_polymarket_sentiment()
+        return jsonify({'status': 'ok', **data})
+    except Exception as e:
+        print('[POLYMARKET] Error: ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/sentiment')
+def api_sentiment():
+    """Combined sentiment endpoint: PCR (50%) + Polymarket (50%) → gauge score 0-100."""
+    try:
+        pcr_data = fetch_pcr()
+        poly_data = fetch_polymarket_sentiment()
+
+        # PCR score: lower PCR = more bullish
+        # Typical range: 0.4 (extreme bullish) to 1.2 (extreme bearish)
+        # Map to 0-100 score: PCR 0.4 → 100, PCR 1.2 → 0
+        pcr_val = pcr_data.get('avg10')
+        pcr_score = None
+        if pcr_val is not None:
+            pcr_score = round(max(0, min(100, (1.2 - pcr_val) / 0.8 * 100)), 1)
+
+        # Polymarket score: avgProb already 0-100
+        poly_score = poly_data.get('avgProb')
+
+        # Composite: 50/50 average
+        if pcr_score is not None and poly_score is not None:
+            composite = round((pcr_score + poly_score) / 2, 1)
+        elif pcr_score is not None:
+            composite = pcr_score
+        elif poly_score is not None:
+            composite = poly_score
+        else:
+            composite = None
+
+        # Label
+        if composite is None: label = 'UNAVAILABLE'
+        elif composite >= 70: label = 'EXTREME GREED'
+        elif composite >= 55: label = 'GREED'
+        elif composite >= 45: label = 'NEUTRAL'
+        elif composite >= 30: label = 'FEAR'
+        else: label = 'EXTREME FEAR'
+
+        return jsonify({
+            'status': 'ok',
+            'composite': composite,
+            'label': label,
+            'components': {
+                'pcr': {'score': pcr_score, 'latest': pcr_data.get('latest'), 'avg10': pcr_val},
+                'polymarket': {'score': poly_score, 'markets': poly_data.get('markets', []), 'count': poly_data.get('count')}
+            }
+        })
+    except Exception as e:
+        print('[SENTIMENT] Error: ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/markets')
 def api_markets():
     result = []
