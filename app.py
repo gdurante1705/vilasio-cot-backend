@@ -1558,15 +1558,15 @@ def build_currency_strength():
     ]
     currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']
 
-    # Fetch all pairs weekly (1 year)
+    # Fetch all pairs daily (1 year)
     pair_data = {}
     for sym, base, quote in pairs_config:
-        data = fetch_yf_weekly(sym, 1)
+        data = fetch_yf_daily(sym, 1)
         if data['dates']:
             pair_data[sym] = {'data': data, 'base': base, 'quote': quote}
 
     # Build strength index: for each currency, average its performance across all pairs
-    # Use weekly returns to build cumulative strength
+    # Use daily returns to build cumulative strength
     # Find common dates across all pairs
     all_date_sets = [set(pd['data']['dates']) for pd in pair_data.values() if pd['data']['dates']]
     if not all_date_sets:
@@ -1575,7 +1575,7 @@ def build_currency_strength():
     if len(common) < 4:
         return {'currencies': currencies, 'series': {}, 'performance': {}}
 
-    # For each currency, compute average weekly return across its pairs
+    # For each currency, compute average daily return across its pairs
     ccy_returns = {c: [0.0] * (len(common) - 1) for c in currencies}
     ccy_counts = {c: [0] * (len(common) - 1) for c in currencies}
 
@@ -1773,7 +1773,7 @@ def api_crossmarket():
     try:
         ck = 'crossmarket_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
             return jsonify(_cache[ck])
 
         status_prices = build_status_prices()
