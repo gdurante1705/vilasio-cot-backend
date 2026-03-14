@@ -1027,8 +1027,11 @@ def api_liquidity():
         except Exception as e:
             print('[LIQUIDITY] S&P 500: ' + str(e))
 
+        last_update = nl_dates[-1] if nl_dates else None
+
         return jsonify({
             'status': 'ok',
+            'lastUpdate': last_update,
             'netLiquidity': {'dates': nl_dates, 'walcl': nl_walcl, 'tga': nl_tga, 'rrp': nl_rrp, 'netLiq': nl_net},
             'balanceSheet': {'dates': bs_dates, 'total': bs_total, 'treasury': bs_tres, 'mbs': bs_mbs, 'other': bs_other},
             'reserves': {'dates': [o['date'] for o in reserves], 'values': [o['value'] for o in reserves]},
