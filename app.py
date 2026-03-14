@@ -1314,8 +1314,8 @@ def api_macro():
         n_mr = len(inf_rank_12)
         if n_mr > 0 and inf_rank_12[-1] is not None and ur_rank_12[-1] is not None:
             ir, ur = inf_rank_12[-1], ur_rank_12[-1]
-            if ur > 80 and ir < 50: policy = 'DOVISH'
-            elif ir > 80 and ur < 50: policy = 'HAWKISH'
+            if ur > 80 and ir < 20: policy = 'DOVISH'
+            elif ir > 80 and ur < 20: policy = 'HAWKISH'
 
         # --- 4-Regime Model (Casario) ---
         # Growth: NFP trend (avg last 3 months)
