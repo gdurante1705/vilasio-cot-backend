@@ -1248,20 +1248,19 @@ def compute_mom_from_index(series):
             out_v.append(round((cur - prev) / prev * 100, 2))
     return out_d, out_v
 
-def morpheus_rank(values, ma_len):
-    """Compute SMA then percent rank (0-100) over lookback = ma_len."""
-    n = len(values)
-    sma = []
-    for i in range(n):
-        if i < ma_len - 1: sma.append(None)
-        else: sma.append(sum(v for v in values[i-ma_len+1:i+1] if v is not None) / ma_len)
+def morpheus_rank(values, lookback):
+    """Compute percent rank (0-100) of each value against its trailing window.
+    No SMA — ranks raw releases directly per the Macro Regime Oscillator spec."""
     ranks = []
-    for i in range(n):
-        if sma[i] is None or i < ma_len * 2:
-            ranks.append(None); continue
-        cur = sma[i]
-        window = [v for v in sma[max(0, i-ma_len*2+1):i+1] if v is not None]
-        if len(window) < 2: ranks.append(None); continue
+    for i in range(len(values)):
+        if i < lookback - 1:
+            ranks.append(None)
+            continue
+        cur = values[i]
+        window = [v for v in values[max(0, i - lookback + 1):i + 1] if v is not None]
+        if len(window) < 2:
+            ranks.append(None)
+            continue
         below = sum(1 for v in window if v < cur)
         ranks.append(round(below / (len(window) - 1) * 100, 1))
     return ranks
@@ -1271,13 +1270,13 @@ def api_macro():
     if not FRED_API_KEY:
         return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
     try:
-        cpi = fetch_fred('CPIAUCSL', 6)
-        core_cpi = fetch_fred('CPILFESL', 6)
-        pce = fetch_fred('PCEPI', 6)
-        core_pce = fetch_fred('PCEPILFE', 6)
-        ppifis = fetch_fred('PPIFIS', 6)
-        unrate = fetch_fred('UNRATE', 6)
-        payems = fetch_fred('PAYEMS', 6)
+        cpi = fetch_fred('CPIAUCSL', 10)
+        core_cpi = fetch_fred('CPILFESL', 10)
+        pce = fetch_fred('PCEPI', 10)
+        core_pce = fetch_fred('PCEPILFE', 10)
+        ppifis = fetch_fred('PPIFIS', 10)
+        unrate = fetch_fred('UNRATE', 10)
+        payems = fetch_fred('PAYEMS', 10)
         icsa = fetch_fred('ICSA', 4)
         gdpc1 = fetch_fred('GDPC1', 6)
         jtsjol = fetch_fred('JTSJOL', 4)
@@ -1303,19 +1302,19 @@ def api_macro():
         morph_inf = [inf_map[d] for d in morph_dates]
         morph_ur = [ur_map[d] for d in morph_dates]
 
-        # Short-term (12 months) and long-term (36 months) ranks
+        # Short-term (12 months) and long-term (52 months) ranks
         inf_rank_12 = morpheus_rank(morph_inf, 12)
         ur_rank_12 = morpheus_rank(morph_ur, 12)
-        inf_rank_36 = morpheus_rank(morph_inf, 36)
-        ur_rank_36 = morpheus_rank(morph_ur, 36)
+        inf_rank_52 = morpheus_rank(morph_inf, 52)
+        ur_rank_52 = morpheus_rank(morph_ur, 52)
 
-        # Policy switch detection (using short-term ranks)
+        # Policy switch detection (using 52M lookback for stability)
         policy = 'NEUTRAL'
-        n_mr = len(inf_rank_12)
-        if n_mr > 0 and inf_rank_12[-1] is not None and ur_rank_12[-1] is not None:
-            ir, ur = inf_rank_12[-1], ur_rank_12[-1]
-            if ur > 80 and ir < 20: policy = 'DOVISH'
-            elif ir > 80 and ur < 20: policy = 'HAWKISH'
+        n_mr = len(inf_rank_52)
+        if n_mr > 0 and inf_rank_52[-1] is not None and ur_rank_52[-1] is not None:
+            ir, ur_val = inf_rank_52[-1], ur_rank_52[-1]
+            if ur_val > 80 and ir < 20: policy = 'DOVISH'
+            elif ir > 80 and ur_val < 20: policy = 'HAWKISH'
 
         # --- 4-Regime Model (Casario) ---
         # Growth: NFP trend (avg last 3 months)
@@ -1358,8 +1357,8 @@ def api_macro():
                 'unrate': morph_ur,
                 'infRank12': inf_rank_12,
                 'urRank12': ur_rank_12,
-                'infRank36': inf_rank_36,
-                'urRank36': ur_rank_36,
+                'infRank52': inf_rank_52,
+                'urRank52': ur_rank_52,
             },
             'gdp': {'dates': [o['date'] for o in gdpc1], 'values': [o['value'] for o in gdpc1]},
         })
