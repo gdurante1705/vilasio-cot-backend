@@ -1448,9 +1448,35 @@ def fetch_yf_daily(symbol, years=2):
         _cache_time[ck] = now
         return result
 
+def fetch_te_indicator(country, indicator):
+    """Fetch any indicator history from Trading Economics API.
+    Returns list of {'date': ..., 'value': ...} sorted chronologically."""
+    if not TE_API_KEY:
+        print('[TE] No API key, skipping ' + country + '/' + indicator)
+        return []
+    try:
+        path = '/historical/country/' + country + '/indicator/' + indicator + '?start_date=2019-01-01'
+        data = fetch_te(path)
+        if not isinstance(data, list) or not data:
+            print('[TE] ' + country + '/' + indicator + ': empty or invalid response')
+            return []
+        # Log first row for format debugging
+        print('[TE] ' + country + '/' + indicator + ' sample: ' + str(data[0]) if data else 'empty')
+        results = []
+        for row in sorted(data, key=lambda x: x.get('DateTime', '')):
+            d = (row.get('DateTime') or '')[:10]
+            v = row.get('Value')
+            if d and v is not None:
+                results.append({'date': d, 'value': float(v)})
+        print('[TE] ' + country + '/' + indicator + ': ' + str(len(results)) + ' obs')
+        return results
+    except Exception as e:
+        print('[TE] ' + country + '/' + indicator + ' error: ' + str(e))
+        return []
+
 def build_ird_data():
     """Build Interest Rate Differential data for major forex pairs.
-    Uses FRED OECD series for foreign yields and CPI indices."""
+    FRED primary, Trading Economics fallback for sparse series."""
     # US 10Y from FRED (daily, 5 years)
     us10y = fetch_fred('DGS10', 5)
     us10y_map = {o['date']: o['value'] for o in us10y}
@@ -1470,23 +1496,26 @@ def build_ird_data():
         if prev and prev > 0:
             us_inf_map[d] = round((cpi_by_date[d] - prev) / prev * 100, 2)
 
-    # Foreign data from FRED (OECD series — monthly)
+    # Foreign data: FRED primary, TE fallback
     pairs_config = {
         'EURUSD': {
-            'yield_series': 'IRLTLT01DEM156N',   # Germany 10Y (monthly)
-            'cpi_series': 'DEUCPIALLMINMEI',      # Germany CPI index
+            'yield_series': 'IRLTLT01DEM156N',
+            'cpi_series': 'DEUCPIALLMINMEI',
+            'te_country': 'germany',
             'fx_symbol': 'EURUSD=X',
             'label': 'EUR/USD'
         },
         'GBPUSD': {
-            'yield_series': 'IRLTLT01GBM156N',   # UK 10Y (monthly)
-            'cpi_series': 'GBRCPIALLMINMEI',      # UK CPI index
+            'yield_series': 'IRLTLT01GBM156N',
+            'cpi_series': 'GBRCPIALLMINMEI',
+            'te_country': 'united kingdom',
             'fx_symbol': 'GBPUSD=X',
             'label': 'GBP/USD'
         },
         'USDJPY': {
-            'yield_series': 'IRLTLT01JPM156N',   # Japan 10Y (monthly)
-            'cpi_series': 'JPNCPIALLMINMEI',      # Japan CPI index
+            'yield_series': 'IRLTLT01JPM156N',
+            'cpi_series': 'JPNCPIALLMINMEI',
+            'te_country': 'japan',
             'fx_symbol': 'USDJPY=X',
             'label': 'USD/JPY'
         }
@@ -1495,26 +1524,43 @@ def build_ird_data():
     ird_results = {}
     for pair_key, cfg in pairs_config.items():
         try:
-            # Fetch foreign 10Y yield from FRED (OECD monthly series)
+            # --- Foreign 10Y yield ---
             foreign_yield_raw = fetch_fred(cfg['yield_series'], 5)
+            print('[IRD] ' + pair_key + ' yield FRED (' + cfg['yield_series'] + '): ' + str(len(foreign_yield_raw)) + ' obs')
+            if len(foreign_yield_raw) < 12:
+                print('[IRD] ' + pair_key + ' yield FRED sparse, trying TE fallback...')
+                te_yield = fetch_te_indicator(cfg['te_country'], 'government bond 10y')
+                if te_yield:
+                    foreign_yield_raw = te_yield
+                    print('[IRD] ' + pair_key + ' yield using TE: ' + str(len(te_yield)) + ' obs')
             foreign_yield_map = {o['date']: o['value'] for o in foreign_yield_raw}
-            print('[IRD] ' + pair_key + ' yield (' + cfg['yield_series'] + '): ' + str(len(foreign_yield_raw)) + ' obs')
 
-            # Fetch foreign CPI index from FRED and compute YoY
+            # --- Foreign CPI / inflation ---
             foreign_cpi_raw = fetch_fred(cfg['cpi_series'], 6)
-            foreign_cpi_by_date = {o['date']: o['value'] for o in foreign_cpi_raw}
+            print('[IRD] ' + pair_key + ' CPI FRED (' + cfg['cpi_series'] + '): ' + str(len(foreign_cpi_raw)) + ' obs')
+
             foreign_inf_map = {}
-            for d in sorted(foreign_cpi_by_date.keys()):
-                dt = datetime.date.fromisoformat(d)
-                prev = None
-                for off in range(-15, 16):
-                    ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
-                    if ck2 in foreign_cpi_by_date:
-                        prev = foreign_cpi_by_date[ck2]
-                        break
-                if prev and prev > 0:
-                    foreign_inf_map[d] = round((foreign_cpi_by_date[d] - prev) / prev * 100, 2)
-            print('[IRD] ' + pair_key + ' inflation (' + cfg['cpi_series'] + '): ' + str(len(foreign_inf_map)) + ' YoY points')
+            if len(foreign_cpi_raw) >= 12:
+                # FRED CPI is an index — compute YoY
+                foreign_cpi_by_date = {o['date']: o['value'] for o in foreign_cpi_raw}
+                for d in sorted(foreign_cpi_by_date.keys()):
+                    dt = datetime.date.fromisoformat(d)
+                    prev = None
+                    for off in range(-15, 16):
+                        ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
+                        if ck2 in foreign_cpi_by_date:
+                            prev = foreign_cpi_by_date[ck2]
+                            break
+                    if prev and prev > 0:
+                        foreign_inf_map[d] = round((foreign_cpi_by_date[d] - prev) / prev * 100, 2)
+                print('[IRD] ' + pair_key + ' inflation from FRED YoY: ' + str(len(foreign_inf_map)) + ' points')
+            else:
+                # TE fallback — inflation rate is already YoY %
+                print('[IRD] ' + pair_key + ' CPI FRED sparse, trying TE fallback...')
+                te_inf = fetch_te_indicator(cfg['te_country'], 'inflation rate')
+                if te_inf:
+                    foreign_inf_map = {o['date']: o['value'] for o in te_inf}
+                    print('[IRD] ' + pair_key + ' inflation using TE: ' + str(len(foreign_inf_map)) + ' points')
 
             # Fetch forex price from yfinance
             fx = fetch_yf_weekly(cfg['fx_symbol'], 5)
@@ -1541,7 +1587,7 @@ def build_ird_data():
                 fx_v = nearest_val(fx_map, fd, 7)
                 fx_aligned.append(fx_v)
 
-            print('[IRD] ' + pair_key + ': ' + str(len(spread_dates)) + ' spread points')
+            print('[IRD] ' + pair_key + ': ' + str(len(spread_dates)) + ' final spread points')
             ird_results[pair_key] = {
                 'label': cfg['label'],
                 'dates': spread_dates,
@@ -1576,28 +1622,6 @@ def build_forex_data():
         result[key] = data
     return result
 
-def fetch_te_rates(country):
-    """Fetch central bank interest rate history from Trading Economics API as fallback."""
-    if not TE_API_KEY:
-        print('[TE] No API key, skipping ' + country)
-        return []
-    try:
-        data = fetch_te('/historical/country/' + country + '/indicator/interest rate?start_date=2019-01-01')
-        if not isinstance(data, list) or not data:
-            print('[TE] ' + country + ': no data or invalid response')
-            return []
-        results = []
-        for row in sorted(data, key=lambda x: x.get('DateTime', '')):
-            d = (row.get('DateTime') or '')[:10]
-            v = row.get('Value')
-            if d and v is not None:
-                results.append({'date': d, 'value': float(v)})
-        print('[TE] ' + country + ' interest rate: ' + str(len(results)) + ' obs')
-        return results
-    except Exception as e:
-        print('[TE] ' + country + ' error: ' + str(e))
-        return []
-
 def build_carry_data():
     """Fetch central bank interest rates. FRED primary, Trading Economics fallback."""
     # FRED series for central bank policy rates
@@ -1625,23 +1649,20 @@ def build_carry_data():
             if len(raw) >= 3:
                 rates[key] = {'dates': [o['date'] for o in raw], 'values': [o['value'] for o in raw], 'latest': raw[-1]['value']}
                 continue
-            # FRED empty or too few — try TE fallback
-            if key in te_countries:
-                print('[CARRY] ' + key + ' FRED empty, trying TE fallback...')
-                te_raw = fetch_te_rates(te_countries[key])
-                if te_raw:
-                    rates[key] = {'dates': [o['date'] for o in te_raw], 'values': [o['value'] for o in te_raw], 'latest': te_raw[-1]['value']}
-                    continue
-            rates[key] = {'dates': [o['date'] for o in raw], 'values': [o['value'] for o in raw], 'latest': raw[-1]['value'] if raw else None}
         except Exception as e:
-            print('[CARRY] ' + key + ' error: ' + str(e))
-            # Try TE fallback on exception too
-            if key in te_countries:
-                te_raw = fetch_te_rates(te_countries[key])
-                if te_raw:
-                    rates[key] = {'dates': [o['date'] for o in te_raw], 'values': [o['value'] for o in te_raw], 'latest': te_raw[-1]['value']}
-                    continue
-            rates[key] = {'dates': [], 'values': [], 'latest': None}
+            print('[CARRY] ' + key + ' FRED error: ' + str(e))
+            raw = []
+        # FRED empty or too few — try TE fallback
+        if key in te_countries:
+            print('[CARRY] ' + key + ' FRED has ' + str(len(raw)) + ' obs (<3), trying TE fallback...')
+            te_raw = fetch_te_indicator(te_countries[key], 'interest rate')
+            if te_raw:
+                print('[CARRY] ' + key + ' using TE: ' + str(len(te_raw)) + ' obs, latest=' + str(te_raw[-1]['value']))
+                rates[key] = {'dates': [o['date'] for o in te_raw], 'values': [o['value'] for o in te_raw], 'latest': te_raw[-1]['value']}
+                continue
+            else:
+                print('[CARRY] ' + key + ' TE fallback also empty!')
+        rates[key] = {'dates': [o['date'] for o in raw], 'values': [o['value'] for o in raw], 'latest': raw[-1]['value'] if raw else None}
 
     # Compute differentials using nearest-value alignment
     diffs = {}
