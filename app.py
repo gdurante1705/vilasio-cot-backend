@@ -1377,31 +1377,6 @@ def api_macro_refresh():
 
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
 
-TE_API_KEY = os.environ.get('TE_API_KEY', '')
-TE_BASE = 'https://api.tradingeconomics.com'
-
-def fetch_te(path):
-    """Fetch from Trading Economics API with caching."""
-    ck = 'te_' + path.replace('/', '_').replace('?', '_')
-    now = datetime.datetime.now()
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
-        return _cache[ck]
-    url = TE_BASE + urllib.parse.quote(path, safe='/?=&') + ('&' if '?' in path else '?') + 'c=' + TE_API_KEY
-    print('[TE] REQUEST: ' + url)
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw_body = resp.read().decode('utf-8')
-        print('[TE] RESPONSE (' + str(len(raw_body)) + ' chars): ' + raw_body[:200])
-        data = json.loads(raw_body)
-        _cache[ck] = data
-        _cache_time[ck] = now
-        return data
-    except Exception as e:
-        print('[TE] FAILED: ' + url)
-        print('[TE] ERROR: ' + str(e))
-        return _cache.get(ck, [])
-
 def fetch_yf_weekly(symbol, years=2):
     """Fetch weekly prices from yfinance with caching."""
     ck = 'yf_weekly_' + symbol.replace('=', '').replace('^', '').replace('-', '')
@@ -1452,169 +1427,6 @@ def fetch_yf_daily(symbol, years=2):
         _cache_time[ck] = now
         return result
 
-def fetch_te_indicator(country, indicator):
-    """Fetch any indicator history from Trading Economics API.
-    Returns list of {'date': ..., 'value': ...} sorted chronologically."""
-    if not TE_API_KEY:
-        print('[TE] No API key, skipping ' + country + '/' + indicator)
-        return []
-    try:
-        path = '/historical/country/' + country + '/indicator/' + indicator + '?start_date=2019-01-01'
-        data = fetch_te(path)
-        if not isinstance(data, list) or not data:
-            print('[TE] ' + country + '/' + indicator + ': empty or invalid response')
-            return []
-        # Log first row for format debugging
-        print('[TE] ' + country + '/' + indicator + ' sample: ' + str(data[0]) if data else 'empty')
-        results = []
-        for row in sorted(data, key=lambda x: x.get('DateTime', '')):
-            d = (row.get('DateTime') or '')[:10]
-            v = row.get('Value')
-            if d and v is not None:
-                results.append({'date': d, 'value': float(v)})
-        print('[TE] ' + country + '/' + indicator + ': ' + str(len(results)) + ' obs')
-        return results
-    except Exception as e:
-        print('[TE] ' + country + '/' + indicator + ' error: ' + str(e))
-        return []
-
-def build_ird_data():
-    """Build Interest Rate Differential data for major forex pairs.
-    FRED primary, Trading Economics fallback for sparse series."""
-    # US 10Y from FRED (daily, 5 years)
-    us10y = fetch_fred('DGS10', 5)
-    us10y_map = {o['date']: o['value'] for o in us10y}
-
-    # US CPI YoY from FRED index
-    cpi_raw = fetch_fred('CPIAUCSL', 6)
-    us_inf_map = {}
-    cpi_by_date = {o['date']: o['value'] for o in cpi_raw}
-    for d in sorted(cpi_by_date.keys()):
-        dt = datetime.date.fromisoformat(d)
-        prev = None
-        for off in range(-15, 16):
-            ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
-            if ck2 in cpi_by_date:
-                prev = cpi_by_date[ck2]
-                break
-        if prev and prev > 0:
-            us_inf_map[d] = round((cpi_by_date[d] - prev) / prev * 100, 2)
-
-    # Foreign data config: source='fred' or source='te'
-    # Japan: FRED OECD series too sparse, use TE directly
-    pairs_config = {
-        'EURUSD': {
-            'source': 'fred',
-            'yield_series': 'IRLTLT01DEM156N',
-            'cpi_series': 'DEUCPIALLMINMEI',
-            'te_country': 'germany',
-            'fx_symbol': 'EURUSD=X',
-            'label': 'EUR/USD'
-        },
-        'GBPUSD': {
-            'source': 'te',
-            'te_country': 'united kingdom',
-            'fx_symbol': 'GBPUSD=X',
-            'label': 'GBP/USD'
-        },
-        'USDJPY': {
-            'source': 'te',
-            'te_country': 'japan',
-            'fx_symbol': 'USDJPY=X',
-            'label': 'USD/JPY'
-        }
-    }
-
-    ird_results = {}
-    for pair_key, cfg in pairs_config.items():
-        try:
-            source = cfg.get('source', 'fred')
-
-            if source == 'te':
-                # --- TE primary (Japan etc.) ---
-                print('[IRD] ' + pair_key + ' using TE primary for ' + cfg['te_country'])
-                foreign_yield_raw = fetch_te_indicator(cfg['te_country'], 'government bond 10y')
-                foreign_yield_map = {o['date']: o['value'] for o in foreign_yield_raw}
-                te_inf = fetch_te_indicator(cfg['te_country'], 'inflation rate')
-                foreign_inf_map = {o['date']: o['value'] for o in te_inf}
-            else:
-                # --- FRED primary with TE fallback ---
-                # Foreign 10Y yield
-                foreign_yield_raw = fetch_fred(cfg['yield_series'], 5)
-                print('[IRD] ' + pair_key + ' yield FRED (' + cfg['yield_series'] + '): ' + str(len(foreign_yield_raw)) + ' obs')
-                if len(foreign_yield_raw) < 12:
-                    print('[IRD] ' + pair_key + ' yield FRED sparse, trying TE...')
-                    te_yield = fetch_te_indicator(cfg['te_country'], 'government bond 10y')
-                    if te_yield:
-                        foreign_yield_raw = te_yield
-                foreign_yield_map = {o['date']: o['value'] for o in foreign_yield_raw}
-
-                # Foreign CPI / inflation
-                foreign_cpi_raw = fetch_fred(cfg['cpi_series'], 6)
-                print('[IRD] ' + pair_key + ' CPI FRED (' + cfg['cpi_series'] + '): ' + str(len(foreign_cpi_raw)) + ' obs')
-                foreign_inf_map = {}
-                foreign_cpi_by_date = {o['date']: o['value'] for o in foreign_cpi_raw}
-                for d in sorted(foreign_cpi_by_date.keys()):
-                    dt = datetime.date.fromisoformat(d)
-                    prev = None
-                    for off in range(-15, 16):
-                        ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
-                        if ck2 in foreign_cpi_by_date:
-                            prev = foreign_cpi_by_date[ck2]
-                            break
-                    if prev and prev > 0:
-                        foreign_inf_map[d] = round((foreign_cpi_by_date[d] - prev) / prev * 100, 2)
-                print('[IRD] ' + pair_key + ' inflation FRED YoY: ' + str(len(foreign_inf_map)) + ' points')
-                if len(foreign_inf_map) < 12:
-                    print('[IRD] ' + pair_key + ' FRED YoY sparse, trying TE...')
-                    te_inf = fetch_te_indicator(cfg['te_country'], 'inflation rate')
-                    if te_inf:
-                        foreign_inf_map = {o['date']: o['value'] for o in te_inf}
-
-            # Fetch forex price from yfinance
-            fx = fetch_yf_weekly(cfg['fx_symbol'], 5)
-
-            # Build monthly spread series on common dates
-            spread_dates, spread_vals, fx_aligned = [], [], []
-            fx_map = {d: v for d, v in zip(fx['dates'], fx['values'])}
-
-            all_foreign_dates = sorted(set(foreign_yield_map.keys()) & set(foreign_inf_map.keys()))
-            for fd in all_foreign_dates:
-                us_y = nearest_val(us10y_map, fd, 15)
-                if us_y is None:
-                    continue
-                us_i = nearest_val(us_inf_map, fd, 45)
-                if us_i is None:
-                    continue
-                foreign_y = foreign_yield_map[fd]
-                foreign_i = foreign_inf_map[fd]
-                us_real = us_y - us_i
-                foreign_real = foreign_y - foreign_i
-                spread = round(foreign_real - us_real, 2)
-                spread_dates.append(fd)
-                spread_vals.append(spread)
-                fx_v = nearest_val(fx_map, fd, 7)
-                fx_aligned.append(fx_v)
-
-            print('[IRD] ' + pair_key + ': ' + str(len(spread_dates)) + ' final spread points')
-            ird_results[pair_key] = {
-                'label': cfg['label'],
-                'dates': spread_dates,
-                'spread': spread_vals,
-                'fxPrice': fx_aligned,
-                'latestSpread': spread_vals[-1] if spread_vals else None,
-                'latestFx': fx_aligned[-1] if fx_aligned else None
-            }
-        except Exception as e:
-            print('[IRD] ' + pair_key + ' error: ' + str(e))
-            ird_results[pair_key] = {
-                'label': cfg.get('label', pair_key),
-                'dates': [], 'spread': [], 'fxPrice': [],
-                'latestSpread': None, 'latestFx': None
-            }
-
-    return ird_results
-
 def build_forex_data():
     """Fetch DXY and major forex pairs (weekly)."""
     symbols = {
@@ -1630,71 +1442,6 @@ def build_forex_data():
         data = fetch_yf_weekly(sym, 2)
         result[key] = data
     return result
-
-def build_carry_data():
-    """Fetch central bank interest rates. FRED primary, Trading Economics fallback."""
-    # Sources: FRED for US/EU/CA, Trading Economics for UK/JP/AU (FRED too sparse)
-    fred_sources = {
-        'US': 'FEDFUNDS',
-        'EU': 'ECBMLFR',
-        'CA': 'IRSTCB01CAM156N',
-    }
-    te_sources = {
-        'UK': 'united kingdom',
-        'JP': 'japan',
-        'AU': 'australia',
-    }
-
-    rates = {}
-    # FRED sources
-    for key, series_id in fred_sources.items():
-        try:
-            raw = fetch_fred(series_id, 5)
-            print('[CARRY] ' + key + ' FRED (' + series_id + '): ' + str(len(raw)) + ' obs')
-            rates[key] = {'dates': [o['date'] for o in raw], 'values': [o['value'] for o in raw], 'latest': raw[-1]['value'] if raw else None}
-        except Exception as e:
-            print('[CARRY] ' + key + ' FRED error: ' + str(e))
-            rates[key] = {'dates': [], 'values': [], 'latest': None}
-    # TE sources (primary)
-    for key, country in te_sources.items():
-        print('[CARRY] ' + key + ' using TE primary (' + country + ')')
-        te_raw = fetch_te_indicator(country, 'interest rate')
-        if te_raw:
-            rates[key] = {'dates': [o['date'] for o in te_raw], 'values': [o['value'] for o in te_raw], 'latest': te_raw[-1]['value']}
-        else:
-            print('[CARRY] ' + key + ' TE returned no data!')
-            rates[key] = {'dates': [], 'values': [], 'latest': None}
-
-    # Compute differentials using nearest-value alignment
-    diffs = {}
-    us = rates.get('US', {})
-    us_map = {d: v for d, v in zip(us.get('dates', []), us.get('values', []))}
-    for pair_key, foreign_key, label in [
-        ('FED_ECB', 'EU', 'Fed - ECB'),
-        ('FED_BOE', 'UK', 'Fed - BOE'),
-        ('FED_BOJ', 'JP', 'Fed - BOJ'),
-        ('FED_BOC', 'CA', 'Fed - BOC'),
-        ('FED_RBA', 'AU', 'Fed - RBA')
-    ]:
-        foreign = rates.get(foreign_key, {})
-        f_map = {d: v for d, v in zip(foreign.get('dates', []), foreign.get('values', []))}
-        if len(f_map) == 0 or len(us_map) == 0:
-            diffs[pair_key] = {'label': label, 'dates': [], 'values': [], 'latest': None}
-            continue
-        diff_dates, diff_vals = [], []
-        for d in sorted(f_map.keys()):
-            us_v = nearest_val(us_map, d, 15)
-            if us_v is not None:
-                diff_dates.append(d)
-                diff_vals.append(round(us_v - f_map[d], 2))
-        diffs[pair_key] = {
-            'label': label,
-            'dates': diff_dates,
-            'values': diff_vals,
-            'latest': diff_vals[-1] if diff_vals else None
-        }
-
-    return {'rates': rates, 'differentials': diffs}
 
 def build_correlation_matrix():
     """Build 7x7 correlation matrix from daily returns."""
@@ -1788,17 +1535,13 @@ def api_crossmarket():
         if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
             return jsonify(_cache[ck])
 
-        ird = build_ird_data()
         forex = build_forex_data()
-        carry = build_carry_data()
         corr = build_correlation_matrix()
 
         result = {
             'status': 'ok',
             'lastUpdate': datetime.date.today().isoformat(),
-            'ird': ird,
             'forex': forex,
-            'carry': carry,
             'correlation': corr
         }
         _cache[ck] = result
@@ -1810,7 +1553,7 @@ def api_crossmarket():
 
 @app.route('/api/crossmarket/refresh')
 def api_crossmarket_refresh():
-    cm_keys = [k for k in _cache if k.startswith('crossmarket_') or k.startswith('te_') or k.startswith('yf_')]
+    cm_keys = [k for k in _cache if k.startswith('crossmarket_') or k.startswith('yf_')]
     for k in cm_keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
