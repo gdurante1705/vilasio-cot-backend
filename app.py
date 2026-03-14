@@ -1443,7 +1443,7 @@ def _fetch_poly_url(url):
         return []
 
 def fetch_consensus_markets():
-    """Fetch macro-relevant prediction markets from Polymarket."""
+    """Fetch macro-relevant prediction markets from Polymarket. 3 calls max."""
     ck = 'consensus_markets'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
@@ -1452,25 +1452,29 @@ def fetch_consensus_markets():
     today = datetime.date.today().isoformat()
     found = {}
 
-    # Strategy 1: title search on events endpoint
-    title_terms = ['recession', 'fed rate', 'inflation', 'interest rate', 'tariff', 'gdp']
-    for term in title_terms:
-        encoded = urllib.parse.quote(term)
-        items = _fetch_poly_url('https://gamma-api.polymarket.com/events?title=' + encoded + '&active=true&closed=false&limit=10')
-        for ev in items:
-            if not isinstance(ev, dict):
-                continue
-            markets = ev.get('markets', [])
-            ev_title = ev.get('title', '')
-            for m in markets:
-                parsed = _parse_market(m, today)
-                if parsed and parsed['slug'] not in found:
-                    if not parsed['question']:
-                        parsed['question'] = ev_title
-                    found[parsed['slug']] = parsed
+    # Strategy 1: events endpoint — one call, filter by keyword
+    items = _fetch_poly_url('https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100')
+    s1 = 0
+    for ev in items:
+        if not isinstance(ev, dict):
+            continue
+        ev_title = ev.get('title', '')
+        ev_slug = ev.get('slug', '')
+        ev_text = (ev_title + ' ' + ev_slug).lower()
+        if not any(kw in ev_text for kw in MACRO_KEYWORDS):
+            continue
+        for m in ev.get('markets', []):
+            parsed = _parse_market(m, today)
+            if parsed and parsed['slug'] not in found:
+                if not parsed['question']:
+                    parsed['question'] = ev_title
+                found[parsed['slug']] = parsed
+                s1 += 1
+    print('[CONSENSUS] Strategy 1 (events): ' + str(s1) + ' markets matched')
 
-    # Strategy 2: bulk markets endpoint, filter by keyword
-    items = _fetch_poly_url('https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=50&order=volume&ascending=false')
+    # Strategy 2: markets endpoint — one call, filter by keyword
+    items = _fetch_poly_url('https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100')
+    s2 = 0
     for m in items:
         parsed = _parse_market(m, today)
         if not parsed or parsed['slug'] in found:
@@ -1478,26 +1482,33 @@ def fetch_consensus_markets():
         q_lower = (parsed['question'] + ' ' + parsed['slug']).lower()
         if any(kw in q_lower for kw in MACRO_KEYWORDS):
             found[parsed['slug']] = parsed
+            s2 += 1
+    print('[CONSENSUS] Strategy 2 (markets): ' + str(s2) + ' markets matched')
 
-    # Strategy 3: CLOB endpoint as fallback
+    # Strategy 3: CLOB — one call, strict keyword filter
     items = _fetch_poly_url('https://clob.polymarket.com/markets')
+    s3 = 0
     for m in items:
         if not isinstance(m, dict):
             continue
         question = m.get('question', '')
-        slug = m.get('market_slug', '') or m.get('condition_id', '')[:20]
-        if slug in found:
+        if not question:
             continue
         q_lower = question.lower()
         if not any(kw in q_lower for kw in MACRO_KEYWORDS):
             continue
-        # CLOB has different price format
+        slug = m.get('market_slug', '') or m.get('condition_id', '')[:20]
+        if slug in found:
+            continue
         tokens = m.get('tokens', [])
         prob = None
         if tokens and isinstance(tokens, list):
             for t in tokens:
                 if t.get('outcome', '').lower() == 'yes':
-                    prob = round(float(t.get('price', 0)) * 100, 1)
+                    try:
+                        prob = round(float(t.get('price', 0)) * 100, 1)
+                    except:
+                        pass
                     break
         if prob is None:
             continue
@@ -1509,6 +1520,8 @@ def fetch_consensus_markets():
             'slug': slug,
             'category': _categorize_market(question)
         }
+        s3 += 1
+    print('[CONSENSUS] Strategy 3 (CLOB): ' + str(s3) + ' markets matched')
 
     result = sorted(found.values(), key=lambda x: -x['volume'])[:12]
     print('[CONSENSUS] TOTAL: ' + str(len(found)) + ' unique, returning ' + str(len(result)))
