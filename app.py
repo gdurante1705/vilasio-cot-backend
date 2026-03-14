@@ -1219,6 +1219,163 @@ def api_bonds_refresh():
     print('[BONDS] Cache cleared (' + str(len(fred_keys)) + ' keys), refetching...')
     return api_bonds()
 
+# ─── MACRO REGIME DASHBOARD (FRED API) ─────────────────────────────────────
+
+def compute_yoy_from_index(series):
+    """Compute YoY % change from a monthly index series."""
+    by_date = {o['date']: o['value'] for o in series}
+    dates = sorted(by_date.keys())
+    out_d, out_v = [], []
+    for d in dates:
+        dt = datetime.date.fromisoformat(d)
+        prev = None
+        for off in range(-15, 16):
+            ck = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
+            if ck in by_date: prev = by_date[ck]; break
+        if prev and prev > 0:
+            out_d.append(d)
+            out_v.append(round((by_date[d] - prev) / prev * 100, 2))
+    return out_d, out_v
+
+def compute_mom_from_index(series):
+    """Compute MoM % change from a monthly index series."""
+    out_d, out_v = [], []
+    for i in range(1, len(series)):
+        prev = series[i-1]['value']
+        cur = series[i]['value']
+        if prev and prev > 0:
+            out_d.append(series[i]['date'])
+            out_v.append(round((cur - prev) / prev * 100, 2))
+    return out_d, out_v
+
+def morpheus_rank(values, ma_len):
+    """Compute SMA then percent rank (0-100) over lookback = ma_len."""
+    n = len(values)
+    sma = []
+    for i in range(n):
+        if i < ma_len - 1: sma.append(None)
+        else: sma.append(sum(v for v in values[i-ma_len+1:i+1] if v is not None) / ma_len)
+    ranks = []
+    for i in range(n):
+        if sma[i] is None or i < ma_len * 2:
+            ranks.append(None); continue
+        cur = sma[i]
+        window = [v for v in sma[max(0, i-ma_len*2+1):i+1] if v is not None]
+        if len(window) < 2: ranks.append(None); continue
+        below = sum(1 for v in window if v < cur)
+        ranks.append(round(below / (len(window) - 1) * 100, 1))
+    return ranks
+
+@app.route('/api/macro')
+def api_macro():
+    if not FRED_API_KEY:
+        return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
+    try:
+        cpi = fetch_fred('CPIAUCSL', 6)
+        core_cpi = fetch_fred('CPILFESL', 6)
+        pce = fetch_fred('PCEPI', 6)
+        core_pce = fetch_fred('PCEPILFE', 6)
+        ppifis = fetch_fred('PPIFIS', 6)
+        unrate = fetch_fred('UNRATE', 6)
+        payems = fetch_fred('PAYEMS', 6)
+        icsa = fetch_fred('ICSA', 4)
+        gdpc1 = fetch_fred('GDPC1', 6)
+        jtsjol = fetch_fred('JTSJOL', 4)
+
+        # --- YoY & MoM ---
+        cpi_yoy_d, cpi_yoy_v = compute_yoy_from_index(cpi)
+        ccpi_yoy_d, ccpi_yoy_v = compute_yoy_from_index(core_cpi)
+        pce_yoy_d, pce_yoy_v = compute_yoy_from_index(pce)
+        cpce_yoy_d, cpce_yoy_v = compute_yoy_from_index(core_pce)
+        ppi_yoy_d, ppi_yoy_v = compute_yoy_from_index(ppifis)
+
+        # --- NFP monthly change (thousands) ---
+        nfp_d, nfp_v = [], []
+        for i in range(1, len(payems)):
+            nfp_d.append(payems[i]['date'])
+            nfp_v.append(round(payems[i]['value'] - payems[i-1]['value'], 1))
+
+        # --- Morpheus Trade Off ---
+        # Align inflation YoY and unemployment on common dates
+        inf_map = {d: v for d, v in zip(cpi_yoy_d, cpi_yoy_v)}
+        ur_map = {o['date']: o['value'] for o in unrate}
+        morph_dates = sorted(set(cpi_yoy_d) & set(ur_map.keys()))
+        morph_inf = [inf_map[d] for d in morph_dates]
+        morph_ur = [ur_map[d] for d in morph_dates]
+
+        # Short-term (12 months) and long-term (36 months) ranks
+        inf_rank_12 = morpheus_rank(morph_inf, 12)
+        ur_rank_12 = morpheus_rank(morph_ur, 12)
+        inf_rank_36 = morpheus_rank(morph_inf, 36)
+        ur_rank_36 = morpheus_rank(morph_ur, 36)
+
+        # Policy switch detection (using short-term ranks)
+        policy = 'NEUTRAL'
+        n_mr = len(inf_rank_12)
+        if n_mr > 0 and inf_rank_12[-1] is not None and ur_rank_12[-1] is not None:
+            ir, ur = inf_rank_12[-1], ur_rank_12[-1]
+            if ur > 80 and ir < 50: policy = 'DOVISH'
+            elif ir > 80 and ur < 50: policy = 'HAWKISH'
+
+        # --- 4-Regime Model (Casario) ---
+        # Growth: NFP trend (avg last 3 months)
+        # Inflation: CPI YoY trend (latest vs 3 months ago)
+        regime = 'UNKNOWN'
+        if len(nfp_v) >= 3 and len(cpi_yoy_v) >= 4:
+            nfp_avg = sum(nfp_v[-3:]) / 3
+            inf_now = cpi_yoy_v[-1]
+            inf_prev = cpi_yoy_v[-4]
+            growth_up = nfp_avg > 0
+            inf_rising = inf_now > inf_prev
+            if growth_up and inf_rising: regime = 'EXPANSION'
+            elif growth_up and not inf_rising: regime = 'REFLATION'
+            elif not growth_up and inf_rising: regime = 'STAGNATION'
+            else: regime = 'SLOWDOWN'
+
+        last_update = cpi_yoy_d[-1] if cpi_yoy_d else None
+
+        return jsonify({
+            'status': 'ok',
+            'lastUpdate': last_update,
+            'regime': regime,
+            'policySwitch': policy,
+            'inflation': {
+                'cpiYoY': {'dates': cpi_yoy_d, 'values': cpi_yoy_v},
+                'coreCpiYoY': {'dates': ccpi_yoy_d, 'values': ccpi_yoy_v},
+                'pceYoY': {'dates': pce_yoy_d, 'values': pce_yoy_v},
+                'corePceYoY': {'dates': cpce_yoy_d, 'values': cpce_yoy_v},
+                'ppiYoY': {'dates': ppi_yoy_d, 'values': ppi_yoy_v},
+            },
+            'labor': {
+                'unrate': {'dates': [o['date'] for o in unrate], 'values': [o['value'] for o in unrate]},
+                'nfp': {'dates': nfp_d, 'values': nfp_v},
+                'icsa': {'dates': [o['date'] for o in icsa], 'values': [o['value'] for o in icsa]},
+                'jolts': {'dates': [o['date'] for o in jtsjol], 'values': [o['value'] for o in jtsjol]},
+            },
+            'morpheus': {
+                'dates': morph_dates,
+                'infYoY': morph_inf,
+                'unrate': morph_ur,
+                'infRank12': inf_rank_12,
+                'urRank12': ur_rank_12,
+                'infRank36': inf_rank_36,
+                'urRank36': ur_rank_36,
+            },
+            'gdp': {'dates': [o['date'] for o in gdpc1], 'values': [o['value'] for o in gdpc1]},
+        })
+    except Exception as e:
+        print('[MACRO] ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/macro/refresh')
+def api_macro_refresh():
+    fred_keys = [k for k in _cache if k.startswith('fred_')]
+    for k in fred_keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[MACRO] Cache cleared (' + str(len(fred_keys)) + ' keys), refetching...')
+    return api_macro()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
