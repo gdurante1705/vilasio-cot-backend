@@ -1687,6 +1687,87 @@ def build_value_growth():
             ratio.append(round(iwd['values'][i] / iwf_map[d], 4))
     return {'dates': dates, 'ratio': ratio, 'iwd': iwd, 'iwf': iwf}
 
+def fetch_coingecko(coin_id):
+    """Fetch 1 year daily prices from CoinGecko free API with caching."""
+    ck = 'cg_' + coin_id
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = 'https://api.coingecko.com/api/v3/coins/' + coin_id + '/market_chart?vs_currency=usd&days=365&interval=daily'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        prices = data.get('prices', [])
+        dates, vals = [], []
+        for ts, price in prices:
+            d = datetime.datetime.utcfromtimestamp(ts / 1000).strftime('%Y-%m-%d')
+            if not dates or dates[-1] != d:
+                dates.append(d)
+                vals.append(round(price, 2))
+        result = {'dates': dates, 'values': vals}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        print('[CG] ' + coin_id + ': ' + str(len(dates)) + ' days')
+        return result
+    except Exception as e:
+        print('[CG] ' + coin_id + ' error: ' + str(e))
+        result = {'dates': [], 'values': []}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+
+def normalize_cluster(assets_data):
+    """Normalize multiple daily series to base 100, aligned on common dates."""
+    # Find common dates
+    all_sets = [set(d['dates']) for d in assets_data.values() if d['dates']]
+    if not all_sets:
+        return {'dates': [], 'series': {}}
+    common = sorted(set.intersection(*all_sets))
+    if len(common) < 10:
+        return {'dates': [], 'series': {}}
+    series = {}
+    for name, data in assets_data.items():
+        lookup = {d: v for d, v in zip(data['dates'], data['values'])}
+        vals = [lookup.get(d) for d in common]
+        # Normalize to 100
+        base = None
+        for v in vals:
+            if v and v > 0:
+                base = v
+                break
+        if base:
+            series[name] = [round(v / base * 100, 2) if v else None for v in vals]
+        else:
+            series[name] = vals
+    return {'dates': common, 'series': series}
+
+def build_cointegration():
+    """Build 3 cointegration clusters: metals, equities, crypto."""
+    # Metals
+    metals_syms = {'Gold': 'GC=F', 'Silver': 'SI=F', 'Platinum': 'PL=F', 'Copper': 'HG=F', 'Palladium': 'PA=F'}
+    metals_data = {}
+    for name, sym in metals_syms.items():
+        metals_data[name] = fetch_yf_daily(sym, 1)
+
+    # Equities
+    eq_syms = {'S&P 500': '^GSPC', 'Nasdaq 100': '^NDX', 'Russell 2000': '^RUT', 'Dow Jones': '^DJI'}
+    eq_data = {}
+    for name, sym in eq_syms.items():
+        eq_data[name] = fetch_yf_daily(sym, 1)
+
+    # Crypto (CoinGecko)
+    crypto_ids = {'Bitcoin': 'bitcoin', 'Ethereum': 'ethereum', 'Solana': 'solana', 'XRP': 'ripple', 'BNB': 'binancecoin'}
+    crypto_data = {}
+    for name, cid in crypto_ids.items():
+        crypto_data[name] = fetch_coingecko(cid)
+
+    return {
+        'metals': normalize_cluster(metals_data),
+        'equities': normalize_cluster(eq_data),
+        'crypto': normalize_cluster(crypto_data)
+    }
+
 @app.route('/api/crossmarket')
 def api_crossmarket():
     try:
@@ -1701,6 +1782,7 @@ def api_crossmarket():
         sectors = build_sector_rotation()
         commodities = build_commodities()
         vg = build_value_growth()
+        coint = build_cointegration()
 
         result = {
             'status': 'ok',
@@ -1710,7 +1792,8 @@ def api_crossmarket():
             'currencyStrength': currency,
             'sectorRotation': sectors,
             'commodities': commodities,
-            'valueGrowth': vg
+            'valueGrowth': vg,
+            'cointegration': coint
         }
         _cache[ck] = result
         _cache_time[ck] = now
@@ -1721,7 +1804,7 @@ def api_crossmarket():
 
 @app.route('/api/crossmarket/refresh')
 def api_crossmarket_refresh():
-    cm_keys = [k for k in _cache if k.startswith('crossmarket_') or k.startswith('yf_')]
+    cm_keys = [k for k in _cache if k.startswith('crossmarket_') or k.startswith('yf_') or k.startswith('cg_')]
     for k in cm_keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
