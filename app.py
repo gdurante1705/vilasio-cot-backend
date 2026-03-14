@@ -1527,6 +1527,208 @@ def build_correlation_matrix():
 
     return {'labels': asset_keys, 'current': current, 'previous': previous}
 
+def pct_change(prices, days_back):
+    """Calculate % change from days_back ago to latest."""
+    if len(prices) < days_back + 1:
+        return None
+    p_now = prices[-1]
+    p_prev = prices[-(days_back + 1)]
+    if p_prev and p_prev != 0:
+        return round((p_now - p_prev) / p_prev * 100, 2)
+    return None
+
+def ytd_change(dates, prices):
+    """Calculate YTD % change (from first trading day of current year)."""
+    year = str(datetime.date.today().year)
+    for i, d in enumerate(dates):
+        if d.startswith(year):
+            if prices[i] and prices[i] != 0 and prices[-1]:
+                return round((prices[-1] - prices[i]) / prices[i] * 100, 2)
+            break
+    return None
+
+def build_currency_strength():
+    """Calculate relative strength index for 8 major currencies."""
+    # Pairs and which currency is base vs quote
+    # Convention: pair XY means 1 X = N Y. If X goes up, X strengthens.
+    pairs_config = [
+        ('EURUSD=X', 'EUR', 'USD'), ('GBPUSD=X', 'GBP', 'USD'),
+        ('USDJPY=X', 'USD', 'JPY'), ('AUDUSD=X', 'AUD', 'USD'),
+        ('USDCAD=X', 'USD', 'CAD'), ('USDCHF=X', 'USD', 'CHF'),
+        ('NZDUSD=X', 'NZD', 'USD'), ('EURGBP=X', 'EUR', 'GBP'),
+        ('EURJPY=X', 'EUR', 'JPY'), ('GBPJPY=X', 'GBP', 'JPY'),
+        ('AUDJPY=X', 'AUD', 'JPY'), ('CADJPY=X', 'CAD', 'JPY'),
+    ]
+    currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']
+
+    # Fetch all pairs weekly (1 year)
+    pair_data = {}
+    for sym, base, quote in pairs_config:
+        data = fetch_yf_weekly(sym, 1)
+        if data['dates']:
+            pair_data[sym] = {'data': data, 'base': base, 'quote': quote}
+
+    # Build strength index: for each currency, average its performance across all pairs
+    # Use weekly returns to build cumulative strength
+    # Find common dates across all pairs
+    all_date_sets = [set(pd['data']['dates']) for pd in pair_data.values() if pd['data']['dates']]
+    if not all_date_sets:
+        return {'currencies': currencies, 'series': {}, 'performance': {}}
+    common = sorted(set.intersection(*all_date_sets))
+    if len(common) < 4:
+        return {'currencies': currencies, 'series': {}, 'performance': {}}
+
+    # For each currency, compute average weekly return across its pairs
+    ccy_returns = {c: [0.0] * (len(common) - 1) for c in currencies}
+    ccy_counts = {c: [0] * (len(common) - 1) for c in currencies}
+
+    for sym, info in pair_data.items():
+        lookup = {d: v for d, v in zip(info['data']['dates'], info['data']['values'])}
+        prices = [lookup.get(d) for d in common]
+        base, quote = info['base'], info['quote']
+        for i in range(1, len(prices)):
+            if prices[i] and prices[i-1] and prices[i-1] != 0:
+                ret = (prices[i] - prices[i-1]) / prices[i-1]
+                # Base currency gains when pair goes up
+                ccy_returns[base][i-1] += ret
+                ccy_counts[base][i-1] += 1
+                # Quote currency loses when pair goes up
+                ccy_returns[quote][i-1] -= ret
+                ccy_counts[quote][i-1] += 1
+
+    # Average and build cumulative index (base 100)
+    series = {}
+    performance = {}
+    for c in currencies:
+        avg_rets = []
+        for i in range(len(ccy_returns[c])):
+            cnt = ccy_counts[c][i]
+            avg_rets.append(ccy_returns[c][i] / cnt if cnt > 0 else 0)
+        # Cumulative index
+        idx = [100.0]
+        for r in avg_rets:
+            idx.append(round(idx[-1] * (1 + r), 2))
+        series[c] = idx
+        # Performance metrics
+        n = len(idx)
+        performance[c] = {
+            'current': idx[-1],
+            'chg1W': round(idx[-1] - idx[-2], 2) if n > 1 else 0,
+            'chg1M': round(idx[-1] - idx[max(0, n-5)], 2) if n > 4 else 0,
+            'chg3M': round(idx[-1] - idx[max(0, n-13)], 2) if n > 12 else 0,
+        }
+
+    return {
+        'currencies': currencies,
+        'dates': common,
+        'series': series,
+        'performance': performance
+    }
+
+def build_sector_rotation():
+    """Fetch sector ETF performance data."""
+    etfs = {
+        'XLK': 'Technology', 'XLF': 'Financials', 'XLE': 'Energy',
+        'XLV': 'Health Care', 'XLU': 'Utilities', 'XLP': 'Cons. Staples',
+        'XLRE': 'Real Estate', 'XLB': 'Materials', 'XLY': 'Cons. Discret.',
+        'XLI': 'Industrials', 'XLC': 'Comm. Services'
+    }
+    result = []
+    for sym, name in etfs.items():
+        data = fetch_yf_daily(sym, 1)
+        if not data['dates'] or len(data['values']) < 5:
+            continue
+        d, v = data['dates'], data['values']
+        result.append({
+            'symbol': sym, 'name': name, 'price': v[-1],
+            'chg1W': pct_change(v, 5),
+            'chg1M': pct_change(v, 21),
+            'chg3M': pct_change(v, 63),
+            'chgYTD': ytd_change(d, v)
+        })
+    result.sort(key=lambda x: x.get('chg1M') or 0, reverse=True)
+    return result
+
+def build_commodities():
+    """Fetch commodity performance data."""
+    commodities = {
+        'GC=F': 'Gold', 'SI=F': 'Silver', 'CL=F': 'Crude Oil',
+        'NG=F': 'Natural Gas', 'HG=F': 'Copper',
+        'ZC=F': 'Corn', 'ZS=F': 'Soybeans'
+    }
+    table = []
+    chart_data = {}
+    for sym, name in commodities.items():
+        daily = fetch_yf_daily(sym, 1)
+        weekly = fetch_yf_weekly(sym, 2)
+        if not daily['dates'] or len(daily['values']) < 5:
+            continue
+        d, v = daily['dates'], daily['values']
+        table.append({
+            'symbol': sym.replace('=F', ''), 'name': name, 'price': v[-1],
+            'chg1W': pct_change(v, 5),
+            'chg1M': pct_change(v, 21),
+            'chg3M': pct_change(v, 63),
+            'chgYTD': ytd_change(d, v)
+        })
+        chart_data[sym.replace('=F', '')] = weekly
+    table.sort(key=lambda x: x.get('chg1M') or 0, reverse=True)
+    return {'table': table, 'charts': chart_data}
+
+def build_seasonality():
+    """Calculate average monthly returns vs current year."""
+    assets = {
+        'SPX': '^GSPC', 'Gold': 'GC=F', 'Oil': 'CL=F',
+        'NatGas': 'NG=F', 'Copper': 'HG=F', 'Silver': 'SI=F'
+    }
+    result = {}
+    current_year = datetime.date.today().year
+    for key, sym in assets.items():
+        data = fetch_yf_daily(sym, 10)
+        if not data['dates'] or len(data['values']) < 250:
+            continue
+        # Group daily closes by year-month
+        monthly = {}  # {(year, month): [close_first, close_last]}
+        for i, d in enumerate(data['dates']):
+            y, m = int(d[:4]), int(d[5:7])
+            k = (y, m)
+            if k not in monthly:
+                monthly[k] = [data['values'][i], data['values'][i]]
+            else:
+                monthly[k][1] = data['values'][i]
+        # Compute monthly returns by year
+        year_months = {}  # {year: {month: return%}}
+        for (y, m), (first, last) in monthly.items():
+            if first and first != 0:
+                ret = (last - first) / first * 100
+                if y not in year_months:
+                    year_months[y] = {}
+                year_months[y][m] = ret
+        # Average historical return per month (excluding current year)
+        hist_avg = []
+        current_yr = []
+        for m in range(1, 13):
+            vals = [year_months[y][m] for y in year_months if y != current_year and m in year_months.get(y, {})]
+            hist_avg.append(round(sum(vals) / len(vals), 2) if vals else 0)
+            current_yr.append(round(year_months.get(current_year, {}).get(m, 0), 2) if current_year in year_months and m in year_months[current_year] else None)
+        result[key] = {'historical': hist_avg, 'current': current_yr}
+    return result
+
+def build_value_growth():
+    """Fetch Value vs Growth ratio (IWD/IWF)."""
+    iwd = fetch_yf_weekly('IWD', 2)
+    iwf = fetch_yf_weekly('IWF', 2)
+    if not iwd['dates'] or not iwf['dates']:
+        return {'dates': [], 'ratio': [], 'iwd': iwd, 'iwf': iwf}
+    # Align on common dates
+    iwf_map = {d: v for d, v in zip(iwf['dates'], iwf['values'])}
+    dates, ratio = [], []
+    for i, d in enumerate(iwd['dates']):
+        if d in iwf_map and iwf_map[d] and iwf_map[d] != 0:
+            dates.append(d)
+            ratio.append(round(iwd['values'][i] / iwf_map[d], 4))
+    return {'dates': dates, 'ratio': ratio, 'iwd': iwd, 'iwf': iwf}
+
 @app.route('/api/crossmarket')
 def api_crossmarket():
     try:
@@ -1537,12 +1739,22 @@ def api_crossmarket():
 
         forex = build_forex_data()
         corr = build_correlation_matrix()
+        currency = build_currency_strength()
+        sectors = build_sector_rotation()
+        commodities = build_commodities()
+        seasonality = build_seasonality()
+        vg = build_value_growth()
 
         result = {
             'status': 'ok',
             'lastUpdate': datetime.date.today().isoformat(),
             'forex': forex,
-            'correlation': corr
+            'correlation': corr,
+            'currencyStrength': currency,
+            'sectorRotation': sectors,
+            'commodities': commodities,
+            'seasonality': seasonality,
+            'valueGrowth': vg
         }
         _cache[ck] = result
         _cache_time[ck] = now
