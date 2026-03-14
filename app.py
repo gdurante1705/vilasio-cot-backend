@@ -1544,10 +1544,71 @@ def ytd_change(dates, prices):
             break
     return None
 
+def fetch_yf_hourly(symbol, days=30):
+    """Fetch hourly prices from yfinance with caching."""
+    ck = 'yf_hourly_' + symbol.replace('=', '').replace('^', '').replace('-', '')
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    import yfinance as yf
+    period = str(min(days, 729)) + 'd'
+    try:
+        df = yf.Ticker(symbol).history(period=period, interval='1h')
+        dates, vals = [], []
+        for idx, row in df.iterrows():
+            dates.append(idx.strftime('%Y-%m-%d %H:%M'))
+            vals.append(round(float(row['Close']), 4))
+        result = {'dates': dates, 'values': vals}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+    except Exception as e:
+        print('[YF] hourly ' + symbol + ': ' + str(e))
+        result = {'dates': [], 'values': []}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+
+def compute_strength(pair_data, currencies):
+    """Compute currency strength index from pair data. Returns {dates, series, performance}."""
+    all_date_sets = [set(pd['data']['dates']) for pd in pair_data.values() if pd['data']['dates']]
+    if not all_date_sets:
+        return {'dates': [], 'series': {}, 'performance': {}}
+    common = sorted(set.intersection(*all_date_sets))
+    if len(common) < 4:
+        return {'dates': [], 'series': {}, 'performance': {}}
+    ccy_returns = {c: [0.0] * (len(common) - 1) for c in currencies}
+    ccy_counts = {c: [0] * (len(common) - 1) for c in currencies}
+    for sym, info in pair_data.items():
+        lookup = {d: v for d, v in zip(info['data']['dates'], info['data']['values'])}
+        prices = [lookup.get(d) for d in common]
+        base, quote = info['base'], info['quote']
+        for i in range(1, len(prices)):
+            if prices[i] and prices[i-1] and prices[i-1] != 0:
+                ret = (prices[i] - prices[i-1]) / prices[i-1]
+                ccy_returns[base][i-1] += ret
+                ccy_counts[base][i-1] += 1
+                ccy_returns[quote][i-1] -= ret
+                ccy_counts[quote][i-1] += 1
+    series = {}
+    performance = {}
+    for c in currencies:
+        avg_rets = [ccy_returns[c][i] / ccy_counts[c][i] if ccy_counts[c][i] > 0 else 0 for i in range(len(ccy_returns[c]))]
+        idx = [100.0]
+        for r in avg_rets:
+            idx.append(round(idx[-1] * (1 + r), 2))
+        series[c] = idx
+        n = len(idx)
+        performance[c] = {
+            'current': idx[-1],
+            'chg1W': round(idx[-1] - idx[-2], 2) if n > 1 else 0,
+            'chg1M': round(idx[-1] - idx[max(0, n-5)], 2) if n > 4 else 0,
+            'chg3M': round(idx[-1] - idx[max(0, n-13)], 2) if n > 12 else 0,
+        }
+    return {'dates': common, 'series': series, 'performance': performance}
+
 def build_currency_strength():
-    """Calculate relative strength index for 8 major currencies."""
-    # Pairs and which currency is base vs quote
-    # Convention: pair XY means 1 X = N Y. If X goes up, X strengthens.
+    """Calculate relative strength index for 8 major currencies. Hourly + daily."""
     pairs_config = [
         ('EURUSD=X', 'EUR', 'USD'), ('GBPUSD=X', 'GBP', 'USD'),
         ('USDJPY=X', 'USD', 'JPY'), ('AUDUSD=X', 'AUD', 'USD'),
@@ -1558,68 +1619,27 @@ def build_currency_strength():
     ]
     currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']
 
-    # Fetch all pairs daily (1 year)
-    pair_data = {}
+    # Daily (1 year)
+    daily_pairs = {}
     for sym, base, quote in pairs_config:
         data = fetch_yf_daily(sym, 1)
         if data['dates']:
-            pair_data[sym] = {'data': data, 'base': base, 'quote': quote}
+            daily_pairs[sym] = {'data': data, 'base': base, 'quote': quote}
+    daily = compute_strength(daily_pairs, currencies)
 
-    # Build strength index: for each currency, average its performance across all pairs
-    # Use daily returns to build cumulative strength
-    # Find common dates across all pairs
-    all_date_sets = [set(pd['data']['dates']) for pd in pair_data.values() if pd['data']['dates']]
-    if not all_date_sets:
-        return {'currencies': currencies, 'series': {}, 'performance': {}}
-    common = sorted(set.intersection(*all_date_sets))
-    if len(common) < 4:
-        return {'currencies': currencies, 'series': {}, 'performance': {}}
-
-    # For each currency, compute average daily return across its pairs
-    ccy_returns = {c: [0.0] * (len(common) - 1) for c in currencies}
-    ccy_counts = {c: [0] * (len(common) - 1) for c in currencies}
-
-    for sym, info in pair_data.items():
-        lookup = {d: v for d, v in zip(info['data']['dates'], info['data']['values'])}
-        prices = [lookup.get(d) for d in common]
-        base, quote = info['base'], info['quote']
-        for i in range(1, len(prices)):
-            if prices[i] and prices[i-1] and prices[i-1] != 0:
-                ret = (prices[i] - prices[i-1]) / prices[i-1]
-                # Base currency gains when pair goes up
-                ccy_returns[base][i-1] += ret
-                ccy_counts[base][i-1] += 1
-                # Quote currency loses when pair goes up
-                ccy_returns[quote][i-1] -= ret
-                ccy_counts[quote][i-1] += 1
-
-    # Average and build cumulative index (base 100)
-    series = {}
-    performance = {}
-    for c in currencies:
-        avg_rets = []
-        for i in range(len(ccy_returns[c])):
-            cnt = ccy_counts[c][i]
-            avg_rets.append(ccy_returns[c][i] / cnt if cnt > 0 else 0)
-        # Cumulative index
-        idx = [100.0]
-        for r in avg_rets:
-            idx.append(round(idx[-1] * (1 + r), 2))
-        series[c] = idx
-        # Performance metrics
-        n = len(idx)
-        performance[c] = {
-            'current': idx[-1],
-            'chg1W': round(idx[-1] - idx[-2], 2) if n > 1 else 0,
-            'chg1M': round(idx[-1] - idx[max(0, n-5)], 2) if n > 4 else 0,
-            'chg3M': round(idx[-1] - idx[max(0, n-13)], 2) if n > 12 else 0,
-        }
+    # Hourly (30 days)
+    hourly_pairs = {}
+    for sym, base, quote in pairs_config:
+        data = fetch_yf_hourly(sym, 30)
+        if data['dates']:
+            hourly_pairs[sym] = {'data': data, 'base': base, 'quote': quote}
+    hourly = compute_strength(hourly_pairs, currencies)
 
     return {
         'currencies': currencies,
-        'dates': common,
-        'series': series,
-        'performance': performance
+        'daily': {'dates': daily['dates'], 'series': daily['series']},
+        'hourly': {'dates': hourly['dates'], 'series': hourly['series']},
+        'performance': daily.get('performance', {})
     }
 
 def build_sector_rotation():
@@ -1687,36 +1707,6 @@ def build_value_growth():
             ratio.append(round(iwd['values'][i] / iwf_map[d], 4))
     return {'dates': dates, 'ratio': ratio, 'iwd': iwd, 'iwf': iwf}
 
-def fetch_coingecko(coin_id):
-    """Fetch 1 year daily prices from CoinGecko free API with caching."""
-    ck = 'cg_' + coin_id
-    now = datetime.datetime.now()
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
-        return _cache[ck]
-    url = 'https://api.coingecko.com/api/v3/coins/' + coin_id + '/market_chart?vs_currency=usd&days=365&interval=daily'
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        prices = data.get('prices', [])
-        dates, vals = [], []
-        for ts, price in prices:
-            d = datetime.datetime.utcfromtimestamp(ts / 1000).strftime('%Y-%m-%d')
-            if not dates or dates[-1] != d:
-                dates.append(d)
-                vals.append(round(price, 2))
-        result = {'dates': dates, 'values': vals}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        print('[CG] ' + coin_id + ': ' + str(len(dates)) + ' days')
-        return result
-    except Exception as e:
-        print('[CG] ' + coin_id + ' error: ' + str(e))
-        result = {'dates': [], 'values': []}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
-
 def normalize_cluster(assets_data):
     """Normalize multiple daily series to % change from first data point.
     Uses union of all dates; fills gaps with nearest available value."""
@@ -1753,30 +1743,27 @@ def normalize_cluster(assets_data):
     return {'dates': all_dates, 'series': series}
 
 def build_cointegration():
-    """Build 3 cointegration clusters: metals, equities, crypto."""
-    # Metals
-    metals_syms = {'Gold': 'GC=F', 'Silver': 'SI=F', 'Platinum': 'PL=F', 'Copper': 'HG=F', 'Palladium': 'PA=F'}
-    metals_data = {}
-    for name, sym in metals_syms.items():
-        metals_data[name] = fetch_yf_daily(sym, 1)
-
-    # Equities
-    eq_syms = {'S&P 500': '^GSPC', 'Nasdaq 100': '^NDX', 'Russell 2000': '^RUT', 'Dow Jones': '^DJI'}
-    eq_data = {}
-    for name, sym in eq_syms.items():
-        eq_data[name] = fetch_yf_daily(sym, 1)
-
-    # Crypto (CoinGecko)
-    crypto_ids = {'Bitcoin': 'bitcoin', 'Ethereum': 'ethereum', 'Solana': 'solana', 'XRP': 'ripple', 'BNB': 'binancecoin'}
-    crypto_data = {}
-    for name, cid in crypto_ids.items():
-        crypto_data[name] = fetch_coingecko(cid)
-
-    return {
-        'metals': normalize_cluster(metals_data),
-        'equities': normalize_cluster(eq_data),
-        'crypto': normalize_cluster(crypto_data)
+    """Build 3 cointegration clusters with hourly + daily data."""
+    clusters = {
+        'metals': {'Gold': 'GC=F', 'Silver': 'SI=F', 'Platinum': 'PL=F', 'Copper': 'HG=F', 'Palladium': 'PA=F'},
+        'equities': {'S&P 500': '^GSPC', 'Nasdaq 100': '^NDX', 'Russell 2000': '^RUT', 'Dow Jones': '^DJI'},
+        'crypto': {'Bitcoin': 'BTC-USD', 'Ethereum': 'ETH-USD', 'Solana': 'SOL-USD', 'XRP': 'XRP-USD', 'BNB': 'BNB-USD'}
     }
+    result = {}
+    for cluster_name, syms in clusters.items():
+        # Daily (1 year)
+        daily_data = {}
+        for name, sym in syms.items():
+            daily_data[name] = fetch_yf_daily(sym, 1)
+        # Hourly (30 days)
+        hourly_data = {}
+        for name, sym in syms.items():
+            hourly_data[name] = fetch_yf_hourly(sym, 30)
+        result[cluster_name] = {
+            'daily': normalize_cluster(daily_data),
+            'hourly': normalize_cluster(hourly_data)
+        }
+    return result
 
 @app.route('/api/crossmarket')
 def api_crossmarket():
@@ -1814,7 +1801,7 @@ def api_crossmarket():
 
 @app.route('/api/crossmarket/refresh')
 def api_crossmarket_refresh():
-    cm_keys = [k for k in _cache if k.startswith('crossmarket_') or k.startswith('yf_') or k.startswith('cg_')]
+    cm_keys = [k for k in _cache if k.startswith('crossmarket_') or k.startswith('yf_')]
     for k in cm_keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
