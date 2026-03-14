@@ -1065,6 +1065,160 @@ def api_liquidity_refresh():
     print('[LIQUIDITY] Cache cleared (' + str(len(fred_keys)) + ' keys), refetching...')
     return api_liquidity()
 
+# ─── BOND & YIELD MONITOR (FRED API) ───────────────────────────────────────
+
+# 2026 FOMC meeting dates (announcement day = day 2)
+FOMC_DATES = [
+    '2026-01-29', '2026-03-19', '2026-05-07', '2026-06-18',
+    '2026-07-30', '2026-09-17', '2026-11-05', '2026-12-17'
+]
+
+def align_on_dates(base_dates, series_map):
+    """Align multiple series on a common set of dates using nearest-value lookup."""
+    result = {}
+    for key, raw in series_map.items():
+        lookup = {o['date']: o['value'] for o in raw}
+        vals = []
+        for d in base_dates:
+            v = lookup.get(d)
+            if v is None:
+                v = nearest_val(lookup, d, 5)
+            vals.append(v)
+        result[key] = vals
+    return result
+
+@app.route('/api/bonds')
+def api_bonds():
+    if not FRED_API_KEY:
+        return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
+    try:
+        # --- Fetch all series ---
+        dgs2 = fetch_fred('DGS2')
+        dgs5 = fetch_fred('DGS5')
+        dgs10 = fetch_fred('DGS10')
+        dgs30 = fetch_fred('DGS30')
+        t10y2y = fetch_fred('T10Y2Y')
+        dfii5 = fetch_fred('DFII5')
+        dfii10 = fetch_fred('DFII10')
+        t5yie = fetch_fred('T5YIE')
+        t10yie = fetch_fred('T10YIE')
+        ig = fetch_fred('BAMLC0A0CM')
+        hy = fetch_fred('BAMLH0A0HYM2')
+        dff = fetch_fred('DFF')
+        upper = fetch_fred('DFEDTARU')
+        lower = fetch_fred('DFEDTARL')
+
+        # --- Yields: align on DGS10 dates (most complete daily series) ---
+        base_dates = [o['date'] for o in dgs10]
+        aligned = align_on_dates(base_dates, {
+            'dgs2': dgs2, 'dgs5': dgs5, 'dgs10': dgs10, 'dgs30': dgs30
+        })
+
+        # --- 2Y-10Y Spread ---
+        sp_dates = [o['date'] for o in t10y2y]
+        sp_vals = [o['value'] for o in t10y2y]
+
+        # --- Real Yields: align on DFII10 dates ---
+        ry_dates = [o['date'] for o in dfii10]
+        ry_aligned = align_on_dates(ry_dates, {'dfii5': dfii5, 'dfii10': dfii10})
+
+        # --- Breakeven: align on T10YIE dates ---
+        be_dates = [o['date'] for o in t10yie]
+        be_aligned = align_on_dates(be_dates, {'t5yie': t5yie, 't10yie': t10yie})
+
+        # --- Credit Spreads ---
+        ig_dates = [o['date'] for o in ig]
+        ig_vals = [o['value'] for o in ig]
+        hy_dates = [o['date'] for o in hy]
+        hy_vals = [o['value'] for o in hy]
+
+        # --- Fed Funds: align on DFF dates ---
+        ff_dates = [o['date'] for o in dff]
+        ff_aligned = align_on_dates(ff_dates, {
+            'effective': dff, 'upper': upper, 'lower': lower
+        })
+
+        # --- Gold price (for real yield correlation) ---
+        gold_dates, gold_vals = [], []
+        try:
+            import yfinance as yf
+            start = (datetime.date.today() - datetime.timedelta(days=365 * 3)).isoformat()
+            df = yf.Ticker('GC=F').history(start=start, interval='1wk')
+            for idx, row in df.iterrows():
+                gold_dates.append(idx.strftime('%Y-%m-%d'))
+                gold_vals.append(round(float(row['Close']), 2))
+        except Exception as e:
+            print('[BONDS] Gold: ' + str(e))
+
+        # --- DXY (for intermarket) ---
+        dxy_dates, dxy_vals = [], []
+        try:
+            import yfinance as yf
+            start = (datetime.date.today() - datetime.timedelta(days=365 * 3)).isoformat()
+            df = yf.Ticker('DX-Y.NYB').history(start=start, interval='1wk')
+            for idx, row in df.iterrows():
+                dxy_dates.append(idx.strftime('%Y-%m-%d'))
+                dxy_vals.append(round(float(row['Close']), 2))
+        except Exception as e:
+            print('[BONDS] DXY: ' + str(e))
+
+        # --- FOMC Calendar ---
+        today = datetime.date.today().isoformat()
+        fomc = []
+        for fd in FOMC_DATES:
+            dt = datetime.date.fromisoformat(fd)
+            delta = (dt - datetime.date.today()).days
+            status = 'past' if delta < 0 else ('next' if not fomc or all(f['status'] == 'past' for f in fomc) else 'upcoming')
+            if delta >= 0 and not any(f['status'] == 'next' for f in fomc):
+                status = 'next'
+            fomc.append({'date': fd, 'daysUntil': delta, 'status': status})
+
+        last_update = base_dates[-1] if base_dates else None
+
+        return jsonify({
+            'status': 'ok',
+            'lastUpdate': last_update,
+            'yields': {
+                'dates': base_dates,
+                'dgs2': aligned['dgs2'], 'dgs5': aligned['dgs5'],
+                'dgs10': aligned['dgs10'], 'dgs30': aligned['dgs30']
+            },
+            'spread': {'dates': sp_dates, 'values': sp_vals},
+            'realYields': {
+                'dates': ry_dates,
+                'dfii5': ry_aligned['dfii5'], 'dfii10': ry_aligned['dfii10']
+            },
+            'breakeven': {
+                'dates': be_dates,
+                't5yie': be_aligned['t5yie'], 't10yie': be_aligned['t10yie']
+            },
+            'credit': {
+                'ig': {'dates': ig_dates, 'values': ig_vals},
+                'hy': {'dates': hy_dates, 'values': hy_vals}
+            },
+            'fedFunds': {
+                'dates': ff_dates,
+                'effective': ff_aligned['effective'],
+                'upper': ff_aligned['upper'],
+                'lower': ff_aligned['lower']
+            },
+            'gold': {'dates': gold_dates, 'values': gold_vals},
+            'dxy': {'dates': dxy_dates, 'values': dxy_vals},
+            'fomc': fomc
+        })
+    except Exception as e:
+        print('[BONDS] ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/bonds/refresh')
+def api_bonds_refresh():
+    fred_keys = [k for k in _cache if k.startswith('fred_') or k.startswith('price_GC') or k.startswith('price_DX')]
+    for k in fred_keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[BONDS] Cache cleared (' + str(len(fred_keys)) + ' keys), refetching...')
+    return api_bonds()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
