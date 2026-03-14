@@ -1391,68 +1391,71 @@ def _categorize_market(text):
         return 'Inflation'
     return 'Macro'
 
+KALSHI_SERIES = [
+    ('KXFEDRATE', 'Fed Policy'), ('KXRECESSION', 'Recession'),
+    ('KXCPI', 'Inflation'), ('KXGDP', 'Recession'),
+    ('KXUNEMPLOYMENT', 'Macro'), ('KXINFLATION', 'Inflation'),
+    ('KXINX', 'Macro'), ('KXNONFARM', 'Macro'),
+    ('KXPCE', 'Inflation'), ('KXTARIFF', 'Macro'),
+]
+
 def fetch_consensus_markets():
-    """Fetch macro-relevant prediction markets from Kalshi public API."""
+    """Fetch macro prediction markets from Kalshi by economic series."""
     ck = 'consensus_markets'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
         return _cache[ck]
 
-    url = 'https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=200'
-    print('[KALSHI] GET ' + url)
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode('utf-8')
-        print('[KALSHI] HTTP ' + str(len(body)) + ' chars')
-        data = json.loads(body)
-        markets = data.get('markets', []) if isinstance(data, dict) else data if isinstance(data, list) else []
-        print('[KALSHI] ' + str(len(markets)) + ' markets fetched')
-        print('[KALSHI] Sample titles: ' + str([(m.get('title', '')[:50], m.get('ticker', '')) for m in markets[:10] if isinstance(m, dict)]))
-        broad = [m.get('title', '')[:60] for m in markets if isinstance(m, dict) and any(w in (m.get('title', '') + ' ' + m.get('subtitle', '')).lower() for w in ['rate', 'fed', 'recession', 'inflation', 'economy', 'gdp', 'cpi', 'price', 'treasury', 'employment', 'job'])]
-        print('[KALSHI] Broad keyword matches: ' + str(broad[:15]))
-    except Exception as e:
-        print('[KALSHI] FAILED: ' + str(e))
-        markets = []
-
     found = {}
-    for m in markets:
-        if not isinstance(m, dict):
+    for series_ticker, default_cat in KALSHI_SERIES:
+        url = 'https://api.elections.kalshi.com/trade-api/v2/markets?status=open&series_ticker=' + series_ticker + '&limit=50'
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            markets = data.get('markets', []) if isinstance(data, dict) else []
+            print('[KALSHI] ' + series_ticker + ': ' + str(len(markets)) + ' markets')
+        except Exception as e:
+            print('[KALSHI] ' + series_ticker + ' FAILED: ' + str(e))
             continue
-        title = m.get('title', '') or ''
-        subtitle = m.get('subtitle', '') or ''
-        ticker = m.get('ticker', '') or ''
-        text = (title + ' ' + subtitle + ' ' + ticker).lower()
-        if not any(kw in text for kw in MACRO_KEYWORDS):
-            continue
-        # Kalshi: yes_ask is the YES probability (cents, 0-100)
-        prob = None
-        for key in ['yes_ask', 'last_price', 'yes_bid']:
-            v = m.get(key)
-            if v is not None:
-                try:
-                    prob = round(float(v), 1)
-                    if prob > 0:
-                        break
-                except:
-                    pass
-        if not prob or prob <= 0:
-            continue
-        vol = int(m.get('volume', 0) or 0)
-        question = title
-        if subtitle:
-            question = title + ' — ' + subtitle
-        found[ticker] = {
-            'question': question,
-            'probability': prob,
-            'volume': vol,
-            'liquidity': int(m.get('open_interest', 0) or 0),
-            'slug': ticker,
-            'category': _categorize_market(text)
-        }
+
+        for m in markets:
+            if not isinstance(m, dict):
+                continue
+            ticker = m.get('ticker', '')
+            if not ticker or ticker in found:
+                continue
+            title = m.get('title', '') or ''
+            subtitle = m.get('subtitle', '') or ''
+            prob = None
+            for key in ['yes_ask', 'last_price', 'yes_bid']:
+                v = m.get(key)
+                if v is not None:
+                    try:
+                        p = round(float(v), 1)
+                        if p > 0:
+                            prob = p
+                            break
+                    except:
+                        pass
+            if not prob:
+                continue
+            vol = int(m.get('volume', 0) or 0)
+            question = title
+            if subtitle:
+                question = title + ' — ' + subtitle
+            text = (title + ' ' + subtitle + ' ' + ticker).lower()
+            found[ticker] = {
+                'question': question,
+                'probability': prob,
+                'volume': vol,
+                'liquidity': int(m.get('open_interest', 0) or 0),
+                'slug': ticker,
+                'category': _categorize_market(text) if any(kw in text for kw in MACRO_KEYWORDS) else default_cat
+            }
 
     result = sorted(found.values(), key=lambda x: -x['volume'])[:12]
-    print('[KALSHI] ' + str(len(found)) + ' matched keywords, returning ' + str(len(result)))
+    print('[KALSHI] TOTAL: ' + str(len(found)) + ' unique markets, returning ' + str(len(result)))
     _cache[ck] = result
     _cache_time[ck] = now
     return result
