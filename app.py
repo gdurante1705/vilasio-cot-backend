@@ -337,7 +337,12 @@ def api_flow():
 
 @app.route('/api/cot/refresh')
 def api_refresh():
-    _cache.clear(); _cache_time.clear()
+    # Clear only COT-related cache entries (preserve FRED cache)
+    cot_keys = [k for k in _cache if not k.startswith('fred_')]
+    for k in cot_keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[COT] Cache cleared (' + str(len(cot_keys)) + ' keys), refetching...')
     data = load_all_data()
     return jsonify({'status': 'refreshed', 'markets': sorted(data.keys()), 'count': len(data)})
 
