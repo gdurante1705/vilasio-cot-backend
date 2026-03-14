@@ -1408,6 +1408,9 @@ def fetch_consensus_markets():
         data = json.loads(body)
         markets = data.get('markets', []) if isinstance(data, dict) else data if isinstance(data, list) else []
         print('[KALSHI] ' + str(len(markets)) + ' markets fetched')
+        print('[KALSHI] Sample titles: ' + str([(m.get('title', '')[:50], m.get('ticker', '')) for m in markets[:10] if isinstance(m, dict)]))
+        broad = [m.get('title', '')[:60] for m in markets if isinstance(m, dict) and any(w in (m.get('title', '') + ' ' + m.get('subtitle', '')).lower() for w in ['rate', 'fed', 'recession', 'inflation', 'economy', 'gdp', 'cpi', 'price', 'treasury', 'employment', 'job'])]
+        print('[KALSHI] Broad keyword matches: ' + str(broad[:15]))
     except Exception as e:
         print('[KALSHI] FAILED: ' + str(e))
         markets = []
