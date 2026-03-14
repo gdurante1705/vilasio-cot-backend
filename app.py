@@ -1427,20 +1427,17 @@ def fetch_yf_daily(symbol, years=2):
         _cache_time[ck] = now
         return result
 
-def build_forex_data():
-    """Fetch DXY and major forex pairs (weekly)."""
-    symbols = {
-        'DXY': 'DX-Y.NYB',
-        'EURUSD': 'EURUSD=X',
-        'GBPUSD': 'GBPUSD=X',
-        'USDJPY': 'USDJPY=X',
-        'AUDUSD': 'AUDUSD=X',
-        'USDCAD': 'USDCAD=X'
-    }
+def build_status_prices():
+    """Fetch latest DXY and EUR/USD for status cards."""
+    dxy = fetch_yf_daily('DX-Y.NYB', 1)
+    eur = fetch_yf_daily('EURUSD=X', 1)
     result = {}
-    for key, sym in symbols.items():
-        data = fetch_yf_weekly(sym, 2)
-        result[key] = data
+    for key, data in [('DXY', dxy), ('EURUSD', eur)]:
+        if data['values'] and len(data['values']) >= 2:
+            v = data['values']
+            result[key] = {'price': v[-1], 'prev': v[-2]}
+        else:
+            result[key] = {'price': None, 'prev': None}
     return result
 
 def build_correlation_matrix():
@@ -1629,9 +1626,9 @@ def build_sector_rotation():
     """Fetch sector ETF performance data."""
     etfs = {
         'XLK': 'Technology', 'XLF': 'Financials', 'XLE': 'Energy',
-        'XLV': 'Health Care', 'XLU': 'Utilities', 'XLP': 'Cons. Staples',
-        'XLRE': 'Real Estate', 'XLB': 'Materials', 'XLY': 'Cons. Discret.',
-        'XLI': 'Industrials', 'XLC': 'Comm. Services'
+        'XLV': 'Health Care', 'XLU': 'Utilities', 'XLP': 'Consumer Staples',
+        'XLRE': 'Real Estate', 'XLB': 'Materials', 'XLY': 'Consumer Discretionary',
+        'XLI': 'Industrials', 'XLC': 'Communication Services'
     }
     result = []
     for sym, name in etfs.items():
@@ -1675,45 +1672,6 @@ def build_commodities():
     table.sort(key=lambda x: x.get('chg1M') or 0, reverse=True)
     return {'table': table, 'charts': chart_data}
 
-def build_seasonality():
-    """Calculate average monthly returns vs current year."""
-    assets = {
-        'SPX': '^GSPC', 'Gold': 'GC=F', 'Oil': 'CL=F',
-        'NatGas': 'NG=F', 'Copper': 'HG=F', 'Silver': 'SI=F'
-    }
-    result = {}
-    current_year = datetime.date.today().year
-    for key, sym in assets.items():
-        data = fetch_yf_daily(sym, 10)
-        if not data['dates'] or len(data['values']) < 250:
-            continue
-        # Group daily closes by year-month
-        monthly = {}  # {(year, month): [close_first, close_last]}
-        for i, d in enumerate(data['dates']):
-            y, m = int(d[:4]), int(d[5:7])
-            k = (y, m)
-            if k not in monthly:
-                monthly[k] = [data['values'][i], data['values'][i]]
-            else:
-                monthly[k][1] = data['values'][i]
-        # Compute monthly returns by year
-        year_months = {}  # {year: {month: return%}}
-        for (y, m), (first, last) in monthly.items():
-            if first and first != 0:
-                ret = (last - first) / first * 100
-                if y not in year_months:
-                    year_months[y] = {}
-                year_months[y][m] = ret
-        # Average historical return per month (excluding current year)
-        hist_avg = []
-        current_yr = []
-        for m in range(1, 13):
-            vals = [year_months[y][m] for y in year_months if y != current_year and m in year_months.get(y, {})]
-            hist_avg.append(round(sum(vals) / len(vals), 2) if vals else 0)
-            current_yr.append(round(year_months.get(current_year, {}).get(m, 0), 2) if current_year in year_months and m in year_months[current_year] else None)
-        result[key] = {'historical': hist_avg, 'current': current_yr}
-    return result
-
 def build_value_growth():
     """Fetch Value vs Growth ratio (IWD/IWF)."""
     iwd = fetch_yf_weekly('IWD', 2)
@@ -1737,23 +1695,21 @@ def api_crossmarket():
         if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
             return jsonify(_cache[ck])
 
-        forex = build_forex_data()
+        status_prices = build_status_prices()
         corr = build_correlation_matrix()
         currency = build_currency_strength()
         sectors = build_sector_rotation()
         commodities = build_commodities()
-        seasonality = build_seasonality()
         vg = build_value_growth()
 
         result = {
             'status': 'ok',
             'lastUpdate': datetime.date.today().isoformat(),
-            'forex': forex,
+            'statusPrices': status_prices,
             'correlation': corr,
             'currencyStrength': currency,
             'sectorRotation': sectors,
             'commodities': commodities,
-            'seasonality': seasonality,
             'valueGrowth': vg
         }
         _cache[ck] = result
