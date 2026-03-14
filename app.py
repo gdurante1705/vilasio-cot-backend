@@ -1387,15 +1387,19 @@ def fetch_te(path):
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
     url = TE_BASE + urllib.parse.quote(path, safe='/?=&') + ('&' if '?' in path else '?') + 'c=' + TE_API_KEY
+    print('[TE] REQUEST: ' + url)
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
+            raw_body = resp.read().decode('utf-8')
+        print('[TE] RESPONSE (' + str(len(raw_body)) + ' chars): ' + raw_body[:200])
+        data = json.loads(raw_body)
         _cache[ck] = data
         _cache_time[ck] = now
         return data
     except Exception as e:
-        print('[TE] ' + path + ': ' + str(e))
+        print('[TE] FAILED: ' + url)
+        print('[TE] ERROR: ' + str(e))
         return _cache.get(ck, [])
 
 def fetch_yf_weekly(symbol, years=2):
@@ -1508,9 +1512,7 @@ def build_ird_data():
             'label': 'EUR/USD'
         },
         'GBPUSD': {
-            'source': 'fred',
-            'yield_series': 'IRLTLT01GBM156N',
-            'cpi_series': 'GBRCPIALLMINMEI',
+            'source': 'te',
             'te_country': 'united kingdom',
             'fx_symbol': 'GBPUSD=X',
             'label': 'GBP/USD'
