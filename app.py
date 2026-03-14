@@ -1050,6 +1050,16 @@ def api_liquidity():
         print('[LIQUIDITY] ' + str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/liquidity/refresh')
+def api_liquidity_refresh():
+    # Clear only FRED-related cache entries
+    fred_keys = [k for k in _cache if k.startswith('fred_') or k.startswith('price_^GSPC')]
+    for k in fred_keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[LIQUIDITY] Cache cleared (' + str(len(fred_keys)) + ' keys), refetching...')
+    return api_liquidity()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
