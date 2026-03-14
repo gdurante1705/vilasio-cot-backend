@@ -1791,55 +1791,6 @@ def build_cointegration():
         }
     return result
 
-def build_discrepancy_alerts(coint):
-    """Detect assets diverging >1.5σ from their cluster average."""
-    alerts = []
-    for cluster_name, cluster_data in coint.items():
-        daily = cluster_data.get('daily', {})
-        series = daily.get('series', {})
-        dates = daily.get('dates', [])
-        if not series or len(dates) < 90:
-            continue
-        keys = list(series.keys())
-        n = len(dates)
-        # Compute cluster average for each date
-        cluster_avg = []
-        for i in range(n):
-            vals = [series[k][i] for k in keys if series[k][i] is not None]
-            cluster_avg.append(sum(vals) / len(vals) if vals else 0)
-        # For each asset, compute deviation from cluster avg
-        for asset in keys:
-            asset_vals = series[asset]
-            # Deviation = asset - cluster_avg for last 90 days
-            devs = []
-            for i in range(max(0, n - 90), n):
-                if asset_vals[i] is not None:
-                    devs.append(asset_vals[i] - cluster_avg[i])
-            if len(devs) < 20:
-                continue
-            # Current deviation (avg of last 20 days)
-            recent_dev = sum(devs[-20:]) / 20
-            # Historical std of deviations
-            mean_dev = sum(devs) / len(devs)
-            variance = sum((d - mean_dev) ** 2 for d in devs) / len(devs)
-            std_dev = max(variance ** 0.5, 0.01)
-            z_score = recent_dev / std_dev
-            if abs(z_score) >= 1.5:
-                current_pct = asset_vals[-1] if asset_vals[-1] is not None else 0
-                avg_pct = cluster_avg[-1]
-                gap = round(current_pct - avg_pct, 2)
-                alerts.append({
-                    'asset': asset,
-                    'cluster': cluster_name.capitalize(),
-                    'deviation': round(z_score, 2),
-                    'direction': 'above' if z_score > 0 else 'below',
-                    'currentPct': round(current_pct, 2),
-                    'clusterAvgPct': round(avg_pct, 2),
-                    'gap': gap
-                })
-    alerts.sort(key=lambda x: abs(x['deviation']), reverse=True)
-    return alerts
-
 @app.route('/api/crossmarket')
 def api_crossmarket():
     try:
@@ -1855,7 +1806,6 @@ def api_crossmarket():
         commodities = build_commodities()
         vg = build_value_growth()
         coint = build_cointegration()
-        disc_alerts = build_discrepancy_alerts(coint)
 
         result = {
             'status': 'ok',
@@ -1866,8 +1816,7 @@ def api_crossmarket():
             'sectorRotation': sectors,
             'commodities': commodities,
             'valueGrowth': vg,
-            'cointegration': coint,
-            'discrepancyAlerts': disc_alerts
+            'cointegration': coint
         }
         _cache[ck] = result
         _cache_time[ck] = now
