@@ -1718,29 +1718,39 @@ def fetch_coingecko(coin_id):
         return result
 
 def normalize_cluster(assets_data):
-    """Normalize multiple daily series to base 100, aligned on common dates."""
-    # Find common dates
+    """Normalize multiple daily series to % change from first data point.
+    Uses union of all dates; fills gaps with nearest available value."""
     all_sets = [set(d['dates']) for d in assets_data.values() if d['dates']]
     if not all_sets:
         return {'dates': [], 'series': {}}
-    common = sorted(set.intersection(*all_sets))
-    if len(common) < 10:
+    all_dates = sorted(set.union(*all_sets))
+    if len(all_dates) < 5:
         return {'dates': [], 'series': {}}
     series = {}
     for name, data in assets_data.items():
+        if not data['dates']:
+            continue
         lookup = {d: v for d, v in zip(data['dates'], data['values'])}
-        vals = [lookup.get(d) for d in common]
-        # Normalize to 100
+        # Fill gaps with last known value (forward fill)
+        vals = []
+        last_known = None
+        for d in all_dates:
+            v = lookup.get(d)
+            if v is not None:
+                last_known = v
+            vals.append(last_known)
+        # % change from first valid value
         base = None
         for v in vals:
             if v and v > 0:
                 base = v
                 break
         if base:
-            series[name] = [round(v / base * 100, 2) if v else None for v in vals]
+            series[name] = [round((v - base) / base * 100, 2) if v else None for v in vals]
         else:
-            series[name] = vals
-    return {'dates': common, 'series': series}
+            series[name] = [None] * len(all_dates)
+        print('[COINT] ' + name + ': ' + str(len(data['dates'])) + ' raw -> ' + str(len(vals)) + ' aligned')
+    return {'dates': all_dates, 'series': series}
 
 def build_cointegration():
     """Build 3 cointegration clusters: metals, equities, crypto."""
