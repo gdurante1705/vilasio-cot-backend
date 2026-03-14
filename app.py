@@ -1576,27 +1576,71 @@ def build_forex_data():
         result[key] = data
     return result
 
+def fetch_te_rates(country):
+    """Fetch central bank interest rate history from Trading Economics API as fallback."""
+    if not TE_API_KEY:
+        print('[TE] No API key, skipping ' + country)
+        return []
+    try:
+        data = fetch_te('/historical/country/' + country + '/indicator/interest rate?start_date=2019-01-01')
+        if not isinstance(data, list) or not data:
+            print('[TE] ' + country + ': no data or invalid response')
+            return []
+        results = []
+        for row in sorted(data, key=lambda x: x.get('DateTime', '')):
+            d = (row.get('DateTime') or '')[:10]
+            v = row.get('Value')
+            if d and v is not None:
+                results.append({'date': d, 'value': float(v)})
+        print('[TE] ' + country + ' interest rate: ' + str(len(results)) + ' obs')
+        return results
+    except Exception as e:
+        print('[TE] ' + country + ' error: ' + str(e))
+        return []
+
 def build_carry_data():
-    """Fetch central bank interest rates from FRED."""
+    """Fetch central bank interest rates. FRED primary, Trading Economics fallback."""
     # FRED series for central bank policy rates
-    rate_series = {
-        'US': 'FEDFUNDS',        # Fed Funds Effective Rate (monthly)
-        'EU': 'ECBMLFR',         # ECB Main Refinancing Rate
-        'UK': 'BOERUKM',         # Bank of England Rate
-        'JP': 'IRSTCB01JPM156N', # Japan Short-Term CB Rate (OECD)
-        'CA': 'IRSTCB01CAM156N', # Canada Short-Term CB Rate (OECD)
-        'AU': 'IRSTCB01AUM156N', # Australia Short-Term CB Rate (OECD)
+    fred_series = {
+        'US': 'FEDFUNDS',
+        'EU': 'ECBMLFR',
+        'UK': 'BOERUKM',
+        'JP': 'IRSTCB01JPM156N',
+        'CA': 'IRSTCB01CAM156N',
+        'AU': 'IRSTCB01AUM156N',
     }
+    # Trading Economics country names as fallback
+    te_countries = {
+        'UK': 'united kingdom',
+        'JP': 'japan',
+        'CA': 'canada',
+        'AU': 'australia',
+    }
+
     rates = {}
-    for key, series_id in rate_series.items():
+    for key, series_id in fred_series.items():
         try:
             raw = fetch_fred(series_id, 5)
-            dates = [o['date'] for o in raw]
-            vals = [o['value'] for o in raw]
-            print('[CARRY] ' + key + ' (' + series_id + '): ' + str(len(raw)) + ' obs')
-            rates[key] = {'dates': dates, 'values': vals, 'latest': vals[-1] if vals else None}
+            print('[CARRY] ' + key + ' FRED (' + series_id + '): ' + str(len(raw)) + ' obs')
+            if len(raw) >= 3:
+                rates[key] = {'dates': [o['date'] for o in raw], 'values': [o['value'] for o in raw], 'latest': raw[-1]['value']}
+                continue
+            # FRED empty or too few — try TE fallback
+            if key in te_countries:
+                print('[CARRY] ' + key + ' FRED empty, trying TE fallback...')
+                te_raw = fetch_te_rates(te_countries[key])
+                if te_raw:
+                    rates[key] = {'dates': [o['date'] for o in te_raw], 'values': [o['value'] for o in te_raw], 'latest': te_raw[-1]['value']}
+                    continue
+            rates[key] = {'dates': [o['date'] for o in raw], 'values': [o['value'] for o in raw], 'latest': raw[-1]['value'] if raw else None}
         except Exception as e:
             print('[CARRY] ' + key + ' error: ' + str(e))
+            # Try TE fallback on exception too
+            if key in te_countries:
+                te_raw = fetch_te_rates(te_countries[key])
+                if te_raw:
+                    rates[key] = {'dates': [o['date'] for o in te_raw], 'values': [o['value'] for o in te_raw], 'latest': te_raw[-1]['value']}
+                    continue
             rates[key] = {'dates': [], 'values': [], 'latest': None}
 
     # Compute differentials using nearest-value alignment
@@ -1612,11 +1656,9 @@ def build_carry_data():
     ]:
         foreign = rates.get(foreign_key, {})
         f_map = {d: v for d, v in zip(foreign.get('dates', []), foreign.get('values', []))}
-        # Use the shorter series dates as base, align the other with nearest val
         if len(f_map) == 0 or len(us_map) == 0:
             diffs[pair_key] = {'label': label, 'dates': [], 'values': [], 'latest': None}
             continue
-        # Use foreign dates as base (usually monthly), find nearest US rate
         diff_dates, diff_vals = [], []
         for d in sorted(f_map.keys()):
             us_v = nearest_val(us_map, d, 15)
