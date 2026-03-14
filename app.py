@@ -910,6 +910,143 @@ def api_markets():
         result.append({'market': sym, 'name': cfg['name'], 'exchange': cfg['exchange'], 'cat': cfg['cat']})
     return jsonify({'markets': result, 'categories': FLOW_CATS, 'heatmap': HEATMAP_MARKETS})
 
+# ─── LIQUIDITY MONITOR (FRED API) ──────────────────────────────────────────
+
+FRED_API_KEY = os.environ.get('FRED_API_KEY', '0054b7d2aa4634dd19a108d211a50e7f')
+FRED_BASE = 'https://api.stlouisfed.org/fred/series/observations'
+
+# Divisor to convert FRED native units to billions USD
+FRED_DIV = {
+    'WALCL': 1000, 'WTREGEN': 1000, 'RRPONTSYD': 1, 'WRESBAL': 1,
+    'TREAST': 1000, 'WSHOMCB': 1000, 'M1SL': 1, 'M2SL': 1, 'MTSDS133FMS': 1000
+}
+
+def fetch_fred(series_id, years=3):
+    ck = 'fred_' + series_id
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    start = (datetime.date.today() - datetime.timedelta(days=365 * years)).isoformat()
+    try:
+        data = fetch_json(FRED_BASE, {
+            'series_id': series_id, 'api_key': FRED_API_KEY,
+            'file_type': 'json', 'observation_start': start, 'sort_order': 'asc'
+        })
+        div = FRED_DIV.get(series_id, 1)
+        obs = []
+        for o in data.get('observations', []):
+            v = o.get('value', '.')
+            if v == '.': continue
+            try: obs.append({'date': o['date'], 'value': round(float(v) / div, 4)})
+            except: continue
+        _cache[ck] = obs
+        _cache_time[ck] = now
+        return obs
+    except Exception as e:
+        print('[FRED] ' + series_id + ': ' + str(e))
+        return _cache.get(ck, [])
+
+def nearest_val(lookup, dt_str, max_days=7):
+    for off in range(max_days):
+        check = (datetime.date.fromisoformat(dt_str) - datetime.timedelta(days=off)).isoformat()
+        if check in lookup: return lookup[check]
+    return None
+
+@app.route('/api/liquidity')
+def api_liquidity():
+    if not FRED_API_KEY:
+        return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
+    try:
+        walcl = fetch_fred('WALCL')
+        tga_raw = fetch_fred('WTREGEN')
+        rrp_raw = fetch_fred('RRPONTSYD')
+        reserves = fetch_fred('WRESBAL')
+        treasury = fetch_fred('TREAST')
+        mbs = fetch_fred('WSHOMCB')
+        m1 = fetch_fred('M1SL')
+        m2 = fetch_fred('M2SL')
+        deficit = fetch_fred('MTSDS133FMS')
+
+        # --- Net Liquidity: WALCL - TGA - RRP (aligned on WALCL weekly dates) ---
+        tga_map = {o['date']: o['value'] for o in tga_raw}
+        rrp_map = {o['date']: o['value'] for o in rrp_raw}
+        nl_dates, nl_walcl, nl_tga, nl_rrp, nl_net = [], [], [], [], []
+        for w in walcl:
+            tv = nearest_val(tga_map, w['date']) or 0
+            rv = nearest_val(rrp_map, w['date']) or 0
+            nl_dates.append(w['date'])
+            nl_walcl.append(round(w['value'], 2))
+            nl_tga.append(round(tv, 2))
+            nl_rrp.append(round(rv, 2))
+            nl_net.append(round(w['value'] - tv - rv, 2))
+
+        # --- Balance Sheet Decomposition ---
+        t_map = {o['date']: o['value'] for o in treasury}
+        m_map = {o['date']: o['value'] for o in mbs}
+        bs_dates, bs_total, bs_tres, bs_mbs, bs_other = [], [], [], [], []
+        for w in walcl:
+            tv = t_map.get(w['date'], 0)
+            mv = m_map.get(w['date'], 0)
+            bs_dates.append(w['date'])
+            bs_total.append(round(w['value'], 2))
+            bs_tres.append(round(tv, 2))
+            bs_mbs.append(round(mv, 2))
+            bs_other.append(round(w['value'] - tv - mv, 2))
+
+        # --- QE/QT: weekly change in WALCL ---
+        qeqt_dates, qeqt_chg = [], []
+        for i in range(1, len(walcl)):
+            qeqt_dates.append(walcl[i]['date'])
+            qeqt_chg.append(round(walcl[i]['value'] - walcl[i-1]['value'], 2))
+        recent = qeqt_chg[-13:] if len(qeqt_chg) >= 13 else qeqt_chg
+        avg_chg = sum(recent) / len(recent) if recent else 0
+        qe_status = 'QE' if avg_chg > 1 else ('QT' if avg_chg < -1 else 'NEUTRAL')
+
+        # --- M2 YoY growth ---
+        m2_map = {o['date']: o['value'] for o in m2}
+        m2y_dates, m2y_vals = [], []
+        for d in sorted(m2_map.keys()):
+            dt = datetime.date.fromisoformat(d)
+            prev = None
+            for off in range(-15, 16):
+                check = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
+                if check in m2_map: prev = m2_map[check]; break
+            if prev and prev > 0:
+                m2y_dates.append(d)
+                m2y_vals.append(round((m2_map[d] - prev) / prev * 100, 2))
+
+        # --- S&P 500 weekly (overlay) ---
+        sp_dates, sp_vals = [], []
+        try:
+            import yfinance as yf
+            start = (datetime.date.today() - datetime.timedelta(days=365 * 3)).isoformat()
+            df = yf.Ticker('^GSPC').history(start=start, interval='1wk')
+            for idx, row in df.iterrows():
+                sp_dates.append(idx.strftime('%Y-%m-%d'))
+                sp_vals.append(round(float(row['Close']), 2))
+        except Exception as e:
+            print('[LIQUIDITY] S&P 500: ' + str(e))
+
+        return jsonify({
+            'status': 'ok',
+            'netLiquidity': {'dates': nl_dates, 'walcl': nl_walcl, 'tga': nl_tga, 'rrp': nl_rrp, 'netLiq': nl_net},
+            'balanceSheet': {'dates': bs_dates, 'total': bs_total, 'treasury': bs_tres, 'mbs': bs_mbs, 'other': bs_other},
+            'reserves': {'dates': [o['date'] for o in reserves], 'values': [o['value'] for o in reserves]},
+            'rrp': {'dates': [o['date'] for o in rrp_raw], 'values': [o['value'] for o in rrp_raw]},
+            'tga': {'dates': [o['date'] for o in tga_raw], 'values': [o['value'] for o in tga_raw]},
+            'moneySupply': {
+                'm1': {'dates': [o['date'] for o in m1], 'values': [o['value'] for o in m1]},
+                'm2': {'dates': [o['date'] for o in m2], 'values': [o['value'] for o in m2]},
+                'm2yoy': {'dates': m2y_dates, 'values': m2y_vals}
+            },
+            'deficit': {'dates': [o['date'] for o in deficit], 'values': [o['value'] for o in deficit]},
+            'sp500': {'dates': sp_dates, 'values': sp_vals},
+            'qeqt': {'dates': qeqt_dates, 'changes': qeqt_chg, 'status': qe_status, 'avgWeekly': round(avg_chg, 2)}
+        })
+    except Exception as e:
+        print('[LIQUIDITY] ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
