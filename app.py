@@ -1386,7 +1386,7 @@ def fetch_te(path):
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
-    url = TE_BASE + path + ('&' if '?' in path else '?') + 'c=' + TE_API_KEY
+    url = TE_BASE + urllib.parse.quote(path, safe='/?=&') + ('&' if '?' in path else '?') + 'c=' + TE_API_KEY
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -1540,23 +1540,22 @@ def build_ird_data():
             print('[IRD] ' + pair_key + ' CPI FRED (' + cfg['cpi_series'] + '): ' + str(len(foreign_cpi_raw)) + ' obs')
 
             foreign_inf_map = {}
-            if len(foreign_cpi_raw) >= 12:
-                # FRED CPI is an index — compute YoY
-                foreign_cpi_by_date = {o['date']: o['value'] for o in foreign_cpi_raw}
-                for d in sorted(foreign_cpi_by_date.keys()):
-                    dt = datetime.date.fromisoformat(d)
-                    prev = None
-                    for off in range(-15, 16):
-                        ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
-                        if ck2 in foreign_cpi_by_date:
-                            prev = foreign_cpi_by_date[ck2]
-                            break
-                    if prev and prev > 0:
-                        foreign_inf_map[d] = round((foreign_cpi_by_date[d] - prev) / prev * 100, 2)
-                print('[IRD] ' + pair_key + ' inflation from FRED YoY: ' + str(len(foreign_inf_map)) + ' points')
-            else:
-                # TE fallback — inflation rate is already YoY %
-                print('[IRD] ' + pair_key + ' CPI FRED sparse, trying TE fallback...')
+            # Try FRED CPI index first, compute YoY
+            foreign_cpi_by_date = {o['date']: o['value'] for o in foreign_cpi_raw}
+            for d in sorted(foreign_cpi_by_date.keys()):
+                dt = datetime.date.fromisoformat(d)
+                prev = None
+                for off in range(-15, 16):
+                    ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
+                    if ck2 in foreign_cpi_by_date:
+                        prev = foreign_cpi_by_date[ck2]
+                        break
+                if prev and prev > 0:
+                    foreign_inf_map[d] = round((foreign_cpi_by_date[d] - prev) / prev * 100, 2)
+            print('[IRD] ' + pair_key + ' inflation FRED YoY: ' + str(len(foreign_inf_map)) + ' points (from ' + str(len(foreign_cpi_raw)) + ' raw)')
+            # If YoY result is too sparse, fallback to TE inflation rate (already YoY %)
+            if len(foreign_inf_map) < 12:
+                print('[IRD] ' + pair_key + ' FRED YoY sparse (' + str(len(foreign_inf_map)) + '<12), trying TE fallback...')
                 te_inf = fetch_te_indicator(cfg['te_country'], 'inflation rate')
                 if te_inf:
                     foreign_inf_map = {o['date']: o['value'] for o in te_inf}
