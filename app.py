@@ -1442,33 +1442,6 @@ def fetch_blockchain_info(metric, timespan='2years'):
         print('[BCI] ' + metric + ': ' + str(e))
         return _cache.get(ck, [])
 
-def fetch_coingecko_btc(days=730):
-    """Fetch BTC price from CoinGecko free API."""
-    ck = 'cg_btc_' + str(days)
-    now = datetime.datetime.now()
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
-        return _cache[ck]
-    url = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=' + str(days) + '&interval=daily'
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        prices = data.get('prices', [])
-        dates, vals = [], []
-        for ts, price in prices:
-            d = datetime.datetime.utcfromtimestamp(ts / 1000).strftime('%Y-%m-%d')
-            if not dates or dates[-1] != d:
-                dates.append(d)
-                vals.append(round(price, 2))
-        result = {'dates': dates, 'values': vals}
-        print('[CG] btc price: ' + str(len(dates)) + ' days')
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
-    except Exception as e:
-        print('[CG] btc price: ' + str(e))
-        return _cache.get(ck, {'dates': [], 'values': []})
-
 def _bci_to_series(raw_values):
     """Convert Blockchain.info values [{x: ts, y: val}] to {dates, values}."""
     dates, vals = [], []
@@ -1510,8 +1483,8 @@ def build_onchain_data():
     mcap = _bci_to_series(mcap_raw)
     txvol = _bci_to_series(txvol_raw)
 
-    # BTC Price
-    btc = fetch_coingecko_btc(730)
+    # BTC Price (Blockchain.info)
+    btc = _bci_to_series(fetch_blockchain_info('market-price', '2years'))
 
     return {
         'btcPrice': btc,
@@ -1543,7 +1516,7 @@ def api_onchain():
 
 @app.route('/api/onchain/refresh')
 def api_onchain_refresh():
-    keys = [k for k in _cache if any(k.startswith(p) for p in ['onchain_', 'bg_', 'fng_', 'bci_', 'cg_btc'])]
+    keys = [k for k in _cache if any(k.startswith(p) for p in ['onchain_', 'bg_', 'fng_', 'bci_'])]
     for k in keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
