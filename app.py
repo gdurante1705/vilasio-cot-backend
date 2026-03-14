@@ -1569,6 +1569,31 @@ def fetch_yf_hourly(symbol, days=30):
         _cache_time[ck] = now
         return result
 
+def fetch_yf_30min(symbol, days=30):
+    """Fetch 30-minute prices from yfinance with caching."""
+    ck = 'yf_30m_' + symbol.replace('=', '').replace('^', '').replace('-', '')
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    import yfinance as yf
+    period = str(min(days, 59)) + 'd'
+    try:
+        df = yf.Ticker(symbol).history(period=period, interval='30m')
+        dates, vals = [], []
+        for idx, row in df.iterrows():
+            dates.append(idx.strftime('%Y-%m-%d %H:%M'))
+            vals.append(round(float(row['Close']), 4))
+        result = {'dates': dates, 'values': vals}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+    except Exception as e:
+        print('[YF] 30m ' + symbol + ': ' + str(e))
+        result = {'dates': [], 'values': []}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+
 def compute_strength(pair_data, currencies):
     """Compute currency strength index from pair data. Returns {dates, series, performance}."""
     all_date_sets = [set(pd['data']['dates']) for pd in pair_data.values() if pd['data']['dates']]
@@ -1755,13 +1780,14 @@ def build_cointegration():
         daily_data = {}
         for name, sym in syms.items():
             daily_data[name] = fetch_yf_daily(sym, 1)
-        # Hourly (30 days)
-        hourly_data = {}
+        # Intraday (30 days) — 30min for equities, hourly for rest
+        intra_data = {}
+        fetch_fn = fetch_yf_30min if cluster_name == 'equities' else fetch_yf_hourly
         for name, sym in syms.items():
-            hourly_data[name] = fetch_yf_hourly(sym, 30)
+            intra_data[name] = fetch_fn(sym, 30)
         result[cluster_name] = {
             'daily': normalize_cluster(daily_data),
-            'hourly': normalize_cluster(hourly_data)
+            'hourly': normalize_cluster(intra_data)
         }
     return result
 
