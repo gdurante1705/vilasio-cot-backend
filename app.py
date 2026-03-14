@@ -1454,6 +1454,7 @@ def fetch_consensus_markets():
 
     # Strategy 1: events endpoint — one call, filter by keyword
     items = _fetch_poly_url('https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100')
+    print('[CONSENSUS] S1 sample titles: ' + str([e.get('title', '')[:60] for e in items[:5] if isinstance(e, dict)]))
     s1 = 0
     for ev in items:
         if not isinstance(ev, dict):
@@ -1474,6 +1475,7 @@ def fetch_consensus_markets():
 
     # Strategy 2: markets endpoint — one call, filter by keyword
     items = _fetch_poly_url('https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100')
+    print('[CONSENSUS] S2 sample questions: ' + str([m.get('question', '')[:60] for m in items[:5] if isinstance(m, dict)]))
     s2 = 0
     for m in items:
         parsed = _parse_market(m, today)
@@ -1487,6 +1489,7 @@ def fetch_consensus_markets():
 
     # Strategy 3: CLOB — one call, strict keyword filter
     items = _fetch_poly_url('https://clob.polymarket.com/markets')
+    print('[CONSENSUS] S3 sample questions: ' + str([m.get('question', '')[:60] for m in items[:5] if isinstance(m, dict)]))
     s3 = 0
     for m in items:
         if not isinstance(m, dict):
@@ -1532,6 +1535,9 @@ def fetch_consensus_markets():
 @app.route('/api/macro/consensus')
 def api_macro_consensus():
     try:
+        # Force refresh for debugging — remove after debug
+        _cache.pop('consensus_markets', None)
+        _cache_time.pop('consensus_markets', None)
         markets = fetch_consensus_markets()
         return jsonify({'status': 'ok', 'markets': markets})
     except Exception as e:
