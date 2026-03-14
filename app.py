@@ -1377,139 +1377,141 @@ def api_macro_refresh():
 
 # ─── MACRO CONSENSUS (Polymarket) ───────────────────────────────────────────
 
-CONSENSUS_SLUGS = [
-    ('fed-decision', 'Fed Decision'),
-    ('fed-rate-cut', 'Fed Rate Cut'),
-    ('federal-funds-rate', 'Fed Funds Rate'),
-    ('fomc', 'FOMC'),
-    ('us-recession', 'US Recession'),
-    ('recession-2026', 'Recession 2026'),
-    ('recession-2025', 'Recession 2025'),
-    ('us-inflation', 'US Inflation'),
-    ('cpi', 'CPI'),
-    ('interest-rate', 'Interest Rate'),
-]
+MACRO_KEYWORDS = ['fed', 'recession', 'inflation', 'cpi', 'rate cut', 'rate hike',
+                  'fomc', 'interest rate', 'gdp', 'unemployment', 'tariff', 'pce',
+                  'treasury', 'deficit', 'debt ceiling', 'stagflation']
+
+def _categorize_market(text):
+    t = text.lower()
+    if 'recession' in t or 'gdp' in t:
+        return 'Recession'
+    if any(w in t for w in ['fed', 'fomc', 'rate cut', 'rate hike', 'interest rate', 'federal']):
+        return 'Fed Policy'
+    if any(w in t for w in ['inflation', 'cpi', 'pce', 'stagflation']):
+        return 'Inflation'
+    return 'Macro'
+
+def _parse_market(m, today):
+    """Parse a single Polymarket market dict. Returns parsed dict or None."""
+    if not isinstance(m, dict):
+        return None
+    if m.get('closed') or m.get('archived'):
+        return None
+    end_date = (m.get('endDate', '') or '')[:10]
+    if end_date and end_date < today:
+        return None
+    raw_prices = m.get('outcomePrices', '[]')
+    try:
+        prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+        prob = round(float(prices[0]) * 100, 1) if prices else None
+    except:
+        prob = None
+    if prob is None:
+        return None
+    vol = float(m.get('volumeNum', 0) or 0)
+    if vol < 5000:
+        return None
+    question = m.get('question', '')
+    slug = m.get('slug', '')
+    return {
+        'question': question,
+        'probability': prob,
+        'volume': round(vol),
+        'liquidity': round(float(m.get('liquidityNum', 0) or 0)),
+        'slug': slug,
+        'category': _categorize_market(question + ' ' + slug)
+    }
+
+def _fetch_poly_url(url):
+    """Fetch a Polymarket URL with verbose logging. Returns parsed JSON or []."""
+    print('[CONSENSUS] GET ' + url)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status = resp.status
+            body = resp.read().decode('utf-8')
+        print('[CONSENSUS] HTTP ' + str(status) + ' | ' + str(len(body)) + ' chars')
+        data = json.loads(body)
+        items = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+        print('[CONSENSUS] Parsed ' + str(len(items)) + ' items')
+        if items and isinstance(items[0], dict):
+            sample = {k: items[0].get(k) for k in ['title', 'question', 'slug', 'volumeNum'] if items[0].get(k)}
+            print('[CONSENSUS] Sample: ' + str(sample)[:200])
+        return items
+    except Exception as e:
+        print('[CONSENSUS] FAILED ' + url + ' | ' + str(e))
+        return []
 
 def fetch_consensus_markets():
-    """Fetch macro-relevant prediction markets from Polymarket Gamma API."""
+    """Fetch macro-relevant prediction markets from Polymarket."""
     ck = 'consensus_markets'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
         return _cache[ck]
 
     today = datetime.date.today().isoformat()
-    found = {}  # slug -> market data, dedup
+    found = {}
 
-    # Strategy 1: search by slug_contains
-    for slug_term, label in CONSENSUS_SLUGS:
-        try:
-            url = 'https://gamma-api.polymarket.com/events?slug=' + slug_term
-            req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-            events = data if isinstance(data, list) else [data]
-            for ev in events:
-                if not ev or not isinstance(ev, dict):
-                    continue
-                markets = ev.get('markets', [])
-                title = ev.get('title', '')
-                for m in markets:
-                    if m.get('closed') or m.get('archived'):
-                        continue
-                    end_date = (m.get('endDate', '') or '')[:10]
-                    if end_date and end_date < today:
-                        continue
-                    slug = m.get('slug', '')
-                    if slug in found:
-                        continue
-                    raw_prices = m.get('outcomePrices', '[]')
-                    try:
-                        prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
-                        prob = round(float(prices[0]) * 100, 1) if prices else None
-                    except:
-                        prob = None
-                    if prob is None:
-                        continue
-                    vol = float(m.get('volumeNum', 0) or 0)
-                    liq = float(m.get('liquidityNum', 0) or 0)
-                    if vol < 5000:
-                        continue
-                    question = m.get('question', '') or title
-                    # Categorize
-                    q_lower = (question + ' ' + slug + ' ' + title).lower()
-                    if any(w in q_lower for w in ['recession']):
-                        cat = 'Recession'
-                    elif any(w in q_lower for w in ['fed', 'fomc', 'rate cut', 'rate hike', 'federal fund', 'interest rate']):
-                        cat = 'Fed Policy'
-                    elif any(w in q_lower for w in ['inflation', 'cpi', 'pce']):
-                        cat = 'Inflation'
-                    else:
-                        cat = 'Macro'
-                    found[slug] = {
-                        'question': question,
-                        'probability': prob,
-                        'volume': round(vol),
-                        'liquidity': round(liq),
-                        'slug': slug,
-                        'category': cat
-                    }
-        except Exception as e:
-            print('[CONSENSUS] slug "' + slug_term + '": ' + str(e))
+    # Strategy 1: title search on events endpoint
+    title_terms = ['recession', 'fed rate', 'inflation', 'interest rate', 'tariff', 'gdp']
+    for term in title_terms:
+        encoded = urllib.parse.quote(term)
+        items = _fetch_poly_url('https://gamma-api.polymarket.com/events?title=' + encoded + '&active=true&closed=false&limit=10')
+        for ev in items:
+            if not isinstance(ev, dict):
+                continue
+            markets = ev.get('markets', [])
+            ev_title = ev.get('title', '')
+            for m in markets:
+                parsed = _parse_market(m, today)
+                if parsed and parsed['slug'] not in found:
+                    if not parsed['question']:
+                        parsed['question'] = ev_title
+                    found[parsed['slug']] = parsed
 
-    # Strategy 2: broad economics tag search
-    try:
-        url = 'https://gamma-api.polymarket.com/markets?tag=economics&active=true&closed=false&limit=30'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        markets = data if isinstance(data, list) else []
-        for m in markets:
-            if not isinstance(m, dict):
-                continue
-            slug = m.get('slug', '')
-            if slug in found:
-                continue
-            end_date = (m.get('endDate', '') or '')[:10]
-            if end_date and end_date < today:
-                continue
-            if m.get('closed') or m.get('archived'):
-                continue
-            raw_prices = m.get('outcomePrices', '[]')
-            try:
-                prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
-                prob = round(float(prices[0]) * 100, 1) if prices else None
-            except:
-                prob = None
-            if prob is None:
-                continue
-            vol = float(m.get('volumeNum', 0) or 0)
-            liq = float(m.get('liquidityNum', 0) or 0)
-            if vol < 10000:
-                continue
-            question = m.get('question', '')
-            q_lower = (question + ' ' + slug).lower()
-            if any(w in q_lower for w in ['fed', 'recession', 'inflation', 'cpi', 'rate cut', 'fomc', 'interest rate', 'gdp', 'unemployment', 'tariff']):
-                if 'recession' in q_lower:
-                    cat = 'Recession'
-                elif any(w in q_lower for w in ['fed', 'fomc', 'rate', 'interest']):
-                    cat = 'Fed Policy'
-                elif any(w in q_lower for w in ['inflation', 'cpi']):
-                    cat = 'Inflation'
-                else:
-                    cat = 'Macro'
-                found[slug] = {
-                    'question': question,
-                    'probability': prob,
-                    'volume': round(vol),
-                    'liquidity': round(liq),
-                    'slug': slug,
-                    'category': cat
-                }
-    except Exception as e:
-        print('[CONSENSUS] tag search: ' + str(e))
+    # Strategy 2: bulk markets endpoint, filter by keyword
+    items = _fetch_poly_url('https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=50&order=volume&ascending=false')
+    for m in items:
+        parsed = _parse_market(m, today)
+        if not parsed or parsed['slug'] in found:
+            continue
+        q_lower = (parsed['question'] + ' ' + parsed['slug']).lower()
+        if any(kw in q_lower for kw in MACRO_KEYWORDS):
+            found[parsed['slug']] = parsed
+
+    # Strategy 3: CLOB endpoint as fallback
+    items = _fetch_poly_url('https://clob.polymarket.com/markets')
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        question = m.get('question', '')
+        slug = m.get('market_slug', '') or m.get('condition_id', '')[:20]
+        if slug in found:
+            continue
+        q_lower = question.lower()
+        if not any(kw in q_lower for kw in MACRO_KEYWORDS):
+            continue
+        # CLOB has different price format
+        tokens = m.get('tokens', [])
+        prob = None
+        if tokens and isinstance(tokens, list):
+            for t in tokens:
+                if t.get('outcome', '').lower() == 'yes':
+                    prob = round(float(t.get('price', 0)) * 100, 1)
+                    break
+        if prob is None:
+            continue
+        found[slug] = {
+            'question': question,
+            'probability': prob,
+            'volume': 0,
+            'liquidity': 0,
+            'slug': slug,
+            'category': _categorize_market(question)
+        }
 
     result = sorted(found.values(), key=lambda x: -x['volume'])[:12]
-    print('[CONSENSUS] Found ' + str(len(result)) + ' markets')
+    print('[CONSENSUS] TOTAL: ' + str(len(found)) + ' unique, returning ' + str(len(result)))
     _cache[ck] = result
     _cache_time[ck] = now
     return result
