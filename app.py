@@ -1375,6 +1375,180 @@ def api_macro_refresh():
     print('[MACRO] Cache cleared (' + str(len(fred_keys)) + ' keys), refetching...')
     return api_macro()
 
+# ─── ON-CHAIN INTELLIGENCE ──────────────────────────────────────────────────
+
+CACHE_TTL_12H = 3600 * 12
+
+def fetch_bgeometrics(metric):
+    """Fetch on-chain metric from BGeometrics. Cache 12h (rate limit 8 req/h)."""
+    ck = 'bg_' + metric
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_12H:
+        return _cache[ck]
+    url = 'https://bitcoin-data.com/api/v1/' + metric
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        if isinstance(data, dict) and 'error' in data:
+            print('[BG] ' + metric + ' error: ' + str(data['error']))
+            return _cache.get(ck, [])
+        result = data[-730:] if isinstance(data, list) and len(data) > 730 else data
+        print('[BG] ' + metric + ': ' + str(len(result)) + ' points')
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+    except Exception as e:
+        print('[BG] ' + metric + ': ' + str(e))
+        return _cache.get(ck, [])
+
+def fetch_fear_greed():
+    """Fetch Fear & Greed Index from Alternative.me."""
+    ck = 'fng_data'
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = 'https://api.alternative.me/fng/?limit=730&format=json'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        items = data.get('data', [])
+        print('[FNG] ' + str(len(items)) + ' days')
+        _cache[ck] = items
+        _cache_time[ck] = now
+        return items
+    except Exception as e:
+        print('[FNG] ' + str(e))
+        return _cache.get(ck, [])
+
+def fetch_blockchain_info(metric, timespan='2years'):
+    """Fetch chart data from Blockchain.info."""
+    ck = 'bci_' + metric + '_' + timespan
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = 'https://api.blockchain.info/charts/' + metric + '?timespan=' + timespan + '&format=json&rollingAverage=7days'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        values = data.get('values', [])
+        print('[BCI] ' + metric + ': ' + str(len(values)) + ' points')
+        _cache[ck] = values
+        _cache_time[ck] = now
+        return values
+    except Exception as e:
+        print('[BCI] ' + metric + ': ' + str(e))
+        return _cache.get(ck, [])
+
+def fetch_coingecko_btc(days=730):
+    """Fetch BTC price from CoinGecko free API."""
+    ck = 'cg_btc_' + str(days)
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=' + str(days) + '&interval=daily'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        prices = data.get('prices', [])
+        dates, vals = [], []
+        for ts, price in prices:
+            d = datetime.datetime.utcfromtimestamp(ts / 1000).strftime('%Y-%m-%d')
+            if not dates or dates[-1] != d:
+                dates.append(d)
+                vals.append(round(price, 2))
+        result = {'dates': dates, 'values': vals}
+        print('[CG] btc price: ' + str(len(dates)) + ' days')
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+    except Exception as e:
+        print('[CG] btc price: ' + str(e))
+        return _cache.get(ck, {'dates': [], 'values': []})
+
+def _bci_to_series(raw_values):
+    """Convert Blockchain.info values [{x: ts, y: val}] to {dates, values}."""
+    dates, vals = [], []
+    for item in raw_values:
+        d = datetime.datetime.utcfromtimestamp(item['x']).strftime('%Y-%m-%d')
+        if not dates or dates[-1] != d:
+            dates.append(d)
+            vals.append(round(item['y'], 2))
+    return {'dates': dates, 'values': vals}
+
+def build_onchain_data():
+    """Build all on-chain data for the dashboard."""
+    # BGeometrics (max 2 calls per hour)
+    mvrv_raw = fetch_bgeometrics('mvrv-zscore')
+    nupl_raw = fetch_bgeometrics('nupl')
+
+    mvrv_dates = [r['d'] for r in mvrv_raw] if mvrv_raw else []
+    mvrv_vals = [float(r.get('mvrvZscore', 0)) for r in mvrv_raw] if mvrv_raw else []
+
+    nupl_dates = [r['d'] for r in nupl_raw] if nupl_raw else []
+    nupl_vals = [float(r.get('nupl', 0)) for r in nupl_raw] if nupl_raw else []
+
+    # Fear & Greed
+    fng_raw = fetch_fear_greed()
+    # Alternative.me returns newest first — reverse
+    fng_reversed = list(reversed(fng_raw)) if fng_raw else []
+    fng_dates = [datetime.datetime.utcfromtimestamp(int(r['timestamp'])).strftime('%Y-%m-%d') for r in fng_reversed]
+    fng_vals = [int(r['value']) for r in fng_reversed]
+    fng_labels = [r.get('value_classification', '') for r in fng_reversed]
+
+    # Blockchain.info
+    active_raw = fetch_blockchain_info('n-unique-addresses', '2years')
+    hash_raw = fetch_blockchain_info('hash-rate', '2years')
+    mcap_raw = fetch_blockchain_info('market-cap', '2years')
+    txvol_raw = fetch_blockchain_info('estimated-transaction-volume-usd', '2years')
+
+    active = _bci_to_series(active_raw)
+    hashrate = _bci_to_series(hash_raw)
+    mcap = _bci_to_series(mcap_raw)
+    txvol = _bci_to_series(txvol_raw)
+
+    # BTC Price
+    btc = fetch_coingecko_btc(730)
+
+    return {
+        'btcPrice': btc,
+        'mvrvZscore': {'dates': mvrv_dates, 'values': mvrv_vals},
+        'nupl': {'dates': nupl_dates, 'values': nupl_vals},
+        'fearGreed': {'dates': fng_dates, 'values': fng_vals, 'labels': fng_labels},
+        'activeAddresses': active,
+        'hashRate': hashrate,
+        'marketCap': mcap,
+        'txVolume': txvol
+    }
+
+@app.route('/api/onchain')
+def api_onchain():
+    try:
+        ck = 'onchain_main'
+        now = datetime.datetime.now()
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
+            return jsonify(_cache[ck])
+        data = build_onchain_data()
+        result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
+        result.update(data)
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return jsonify(result)
+    except Exception as e:
+        print('[ONCHAIN] ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/onchain/refresh')
+def api_onchain_refresh():
+    keys = [k for k in _cache if any(k.startswith(p) for p in ['onchain_', 'bg_', 'fng_', 'bci_', 'cg_btc'])]
+    for k in keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[ONCHAIN] Cache cleared (' + str(len(keys)) + ' keys)')
+    return api_onchain()
 
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
 
