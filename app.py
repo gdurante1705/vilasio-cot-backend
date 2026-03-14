@@ -1375,6 +1375,388 @@ def api_macro_refresh():
     print('[MACRO] Cache cleared (' + str(len(fred_keys)) + ' keys), refetching...')
     return api_macro()
 
+# ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
+
+TE_API_KEY = os.environ.get('TE_API_KEY', '')
+TE_BASE = 'https://api.tradingeconomics.com'
+
+def fetch_te(path):
+    """Fetch from Trading Economics API with caching."""
+    ck = 'te_' + path.replace('/', '_').replace('?', '_')
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    url = TE_BASE + path + ('&' if '?' in path else '?') + 'c=' + TE_API_KEY
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        _cache[ck] = data
+        _cache_time[ck] = now
+        return data
+    except Exception as e:
+        print('[TE] ' + path + ': ' + str(e))
+        return _cache.get(ck, [])
+
+def fetch_yf_weekly(symbol, years=2):
+    """Fetch weekly prices from yfinance with caching."""
+    ck = 'yf_weekly_' + symbol.replace('=', '').replace('^', '').replace('-', '')
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    import yfinance as yf
+    start = (datetime.date.today() - datetime.timedelta(days=365 * years)).isoformat()
+    try:
+        df = yf.Ticker(symbol).history(start=start, interval='1wk')
+        dates, vals = [], []
+        for idx, row in df.iterrows():
+            dates.append(idx.strftime('%Y-%m-%d'))
+            vals.append(round(float(row['Close']), 4))
+        result = {'dates': dates, 'values': vals}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+    except Exception as e:
+        print('[YF] ' + symbol + ': ' + str(e))
+        result = {'dates': [], 'values': []}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+
+def fetch_yf_daily(symbol, years=2):
+    """Fetch daily prices from yfinance with caching."""
+    ck = 'yf_daily_' + symbol.replace('=', '').replace('^', '').replace('-', '')
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+        return _cache[ck]
+    import yfinance as yf
+    start = (datetime.date.today() - datetime.timedelta(days=365 * years)).isoformat()
+    try:
+        df = yf.Ticker(symbol).history(start=start, interval='1d')
+        dates, vals = [], []
+        for idx, row in df.iterrows():
+            dates.append(idx.strftime('%Y-%m-%d'))
+            vals.append(round(float(row['Close']), 4))
+        result = {'dates': dates, 'values': vals}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+    except Exception as e:
+        print('[YF] ' + symbol + ': ' + str(e))
+        result = {'dates': [], 'values': []}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return result
+
+def build_ird_data():
+    """Build Interest Rate Differential data for major forex pairs."""
+    # US 10Y from FRED (daily, 5 years for deep history)
+    us10y = fetch_fred('DGS10', 5)
+    us10y_map = {o['date']: o['value'] for o in us10y}
+
+    # US CPI YoY (already have from macro — recompute from FRED)
+    cpi_raw = fetch_fred('CPIAUCSL', 6)
+    us_inf_map = {}
+    cpi_by_date = {o['date']: o['value'] for o in cpi_raw}
+    for d in sorted(cpi_by_date.keys()):
+        dt = datetime.date.fromisoformat(d)
+        prev = None
+        for off in range(-15, 16):
+            ck = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
+            if ck in cpi_by_date:
+                prev = cpi_by_date[ck]
+                break
+        if prev and prev > 0:
+            us_inf_map[d] = round((cpi_by_date[d] - prev) / prev * 100, 2)
+
+    # Foreign yields + inflation from Trading Economics
+    pairs_config = {
+        'EURUSD': {
+            'country': 'germany',
+            'yield_indicator': 'government bond 10y',
+            'inflation_indicator': 'inflation rate',
+            'fx_symbol': 'EURUSD=X',
+            'label': 'EUR/USD'
+        },
+        'GBPUSD': {
+            'country': 'united kingdom',
+            'yield_indicator': 'government bond 10y',
+            'inflation_indicator': 'inflation rate',
+            'fx_symbol': 'GBPUSD=X',
+            'label': 'GBP/USD'
+        },
+        'USDJPY': {
+            'country': 'japan',
+            'yield_indicator': 'government bond 10y',
+            'inflation_indicator': 'inflation rate',
+            'fx_symbol': 'USDJPY=X',
+            'label': 'USD/JPY'
+        }
+    }
+
+    ird_results = {}
+    for pair_key, cfg in pairs_config.items():
+        try:
+            # Fetch foreign yield + inflation from TE
+            te_yield = fetch_te('/historical/country/' + cfg['country'] + '/indicator/' + cfg['yield_indicator'] + '?start_date=' + (datetime.date.today() - datetime.timedelta(days=365*5)).isoformat())
+            te_inf = fetch_te('/historical/country/' + cfg['country'] + '/indicator/' + cfg['inflation_indicator'] + '?start_date=' + (datetime.date.today() - datetime.timedelta(days=365*6)).isoformat())
+
+            # Build foreign yield map (monthly — TE returns monthly data)
+            foreign_yield_map = {}
+            if isinstance(te_yield, list):
+                for row in te_yield:
+                    d = (row.get('DateTime') or '')[:10]
+                    v = row.get('Value')
+                    if d and v is not None:
+                        foreign_yield_map[d] = float(v)
+
+            # Build foreign inflation map
+            foreign_inf_map = {}
+            if isinstance(te_inf, list):
+                for row in te_inf:
+                    d = (row.get('DateTime') or '')[:10]
+                    v = row.get('Value')
+                    if d and v is not None:
+                        foreign_inf_map[d] = float(v)
+
+            # Fetch forex price from yfinance
+            fx = fetch_yf_weekly(cfg['fx_symbol'], 5)
+
+            # Build monthly spread series aligned on common dates
+            # Use monthly dates from foreign data (it's the limiting factor)
+            spread_dates, spread_vals, fx_aligned = [], [], []
+            fx_map = {d: v for d, v in zip(fx['dates'], fx['values'])}
+
+            all_foreign_dates = sorted(set(foreign_yield_map.keys()) & set(foreign_inf_map.keys()))
+            for fd in all_foreign_dates:
+                # Get US 10Y nearest to this date
+                us_y = nearest_val(us10y_map, fd, 15)
+                if us_y is None:
+                    continue
+                # Get US inflation nearest to this date
+                us_i = nearest_val(us_inf_map, fd, 45)
+                if us_i is None:
+                    continue
+                foreign_y = foreign_yield_map[fd]
+                foreign_i = foreign_inf_map[fd]
+                # Real yield = nominal - inflation
+                us_real = us_y - us_i
+                foreign_real = foreign_y - foreign_i
+                spread = round(foreign_real - us_real, 2)
+                spread_dates.append(fd)
+                spread_vals.append(spread)
+                # Align FX price
+                fx_v = nearest_val(fx_map, fd, 7)
+                fx_aligned.append(fx_v)
+
+            ird_results[pair_key] = {
+                'label': cfg['label'],
+                'dates': spread_dates,
+                'spread': spread_vals,
+                'fxPrice': fx_aligned,
+                'latestSpread': spread_vals[-1] if spread_vals else None,
+                'latestFx': fx_aligned[-1] if fx_aligned else None
+            }
+        except Exception as e:
+            print('[IRD] ' + pair_key + ': ' + str(e))
+            ird_results[pair_key] = {
+                'label': cfg.get('label', pair_key),
+                'dates': [], 'spread': [], 'fxPrice': [],
+                'latestSpread': None, 'latestFx': None
+            }
+
+    return ird_results
+
+def build_forex_data():
+    """Fetch DXY and major forex pairs (weekly)."""
+    symbols = {
+        'DXY': 'DX-Y.NYB',
+        'EURUSD': 'EURUSD=X',
+        'GBPUSD': 'GBPUSD=X',
+        'USDJPY': 'USDJPY=X',
+        'AUDUSD': 'AUDUSD=X',
+        'USDCAD': 'USDCAD=X'
+    }
+    result = {}
+    for key, sym in symbols.items():
+        data = fetch_yf_weekly(sym, 2)
+        result[key] = data
+    return result
+
+def build_carry_data():
+    """Fetch central bank interest rates from Trading Economics."""
+    countries = {
+        'US': 'united states',
+        'EU': 'euro area',
+        'UK': 'united kingdom',
+        'JP': 'japan',
+        'CA': 'canada',
+        'AU': 'australia'
+    }
+    rates = {}
+    for key, country in countries.items():
+        try:
+            data = fetch_te('/historical/country/' + country + '/indicator/interest rate?start_date=' + (datetime.date.today() - datetime.timedelta(days=365*5)).isoformat())
+            dates, vals = [], []
+            if isinstance(data, list):
+                for row in sorted(data, key=lambda x: x.get('DateTime', '')):
+                    d = (row.get('DateTime') or '')[:10]
+                    v = row.get('Value')
+                    if d and v is not None:
+                        dates.append(d)
+                        vals.append(float(v))
+            rates[key] = {'dates': dates, 'values': vals, 'latest': vals[-1] if vals else None}
+        except Exception as e:
+            print('[CARRY] ' + key + ': ' + str(e))
+            rates[key] = {'dates': [], 'values': [], 'latest': None}
+
+    # Compute differentials
+    diffs = {}
+    us = rates.get('US', {})
+    us_map = {d: v for d, v in zip(us.get('dates', []), us.get('values', []))}
+    for pair_key, foreign_key, label in [
+        ('FED_ECB', 'EU', 'Fed - ECB'),
+        ('FED_BOE', 'UK', 'Fed - BOE'),
+        ('FED_BOJ', 'JP', 'Fed - BOJ'),
+        ('FED_BOC', 'CA', 'Fed - BOC'),
+        ('FED_RBA', 'AU', 'Fed - RBA')
+    ]:
+        foreign = rates.get(foreign_key, {})
+        f_map = {d: v for d, v in zip(foreign.get('dates', []), foreign.get('values', []))}
+        # Align on common dates
+        common = sorted(set(us_map.keys()) & set(f_map.keys()))
+        diff_dates = common
+        diff_vals = [round(us_map[d] - f_map[d], 2) for d in common]
+        diffs[pair_key] = {
+            'label': label,
+            'dates': diff_dates,
+            'values': diff_vals,
+            'latest': diff_vals[-1] if diff_vals else None
+        }
+
+    return {'rates': rates, 'differentials': diffs}
+
+def build_correlation_matrix():
+    """Build 7x7 correlation matrix from daily returns."""
+    assets = {
+        'SPX': '^GSPC',
+        'Gold': 'GC=F',
+        'DXY': 'DX-Y.NYB',
+        'US10Y': '^TNX',
+        'Oil': 'CL=F',
+        'EURUSD': 'EURUSD=X',
+        'BTC': 'BTC-USD'
+    }
+    # Fetch daily data
+    price_data = {}
+    for key, sym in assets.items():
+        data = fetch_yf_daily(sym, 2)
+        price_data[key] = data
+
+    asset_keys = list(assets.keys())
+    n = len(asset_keys)
+
+    # Build aligned return series on common dates
+    all_dates = None
+    for key in asset_keys:
+        s = set(price_data[key]['dates'])
+        if all_dates is None:
+            all_dates = s
+        else:
+            all_dates = all_dates & s
+    if not all_dates or len(all_dates) < 30:
+        # Fallback: empty matrix
+        return {'labels': asset_keys, 'current': [[0]*n for _ in range(n)], 'previous': [[0]*n for _ in range(n)]}
+
+    common_dates = sorted(all_dates)
+    # Build price lookup and compute returns
+    returns = {}
+    for key in asset_keys:
+        lookup = {d: v for d, v in zip(price_data[key]['dates'], price_data[key]['values'])}
+        prices = [lookup[d] for d in common_dates]
+        rets = []
+        for i in range(1, len(prices)):
+            if prices[i-1] and prices[i-1] != 0:
+                rets.append((prices[i] - prices[i-1]) / prices[i-1])
+            else:
+                rets.append(0)
+        returns[key] = rets
+
+    # Rolling 90-day correlation
+    window = 90
+    total_rets = len(returns[asset_keys[0]])
+    if total_rets < window:
+        window = total_rets
+
+    def corr_matrix(start, end):
+        matrix = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                if i == j:
+                    row.append(1.0)
+                else:
+                    r1 = returns[asset_keys[i]][start:end]
+                    r2 = returns[asset_keys[j]][start:end]
+                    k = len(r1)
+                    if k < 10:
+                        row.append(0)
+                        continue
+                    m1 = sum(r1) / k
+                    m2 = sum(r2) / k
+                    num = sum((r1[x]-m1)*(r2[x]-m2) for x in range(k))
+                    d1 = max(1e-10, sum((r1[x]-m1)**2 for x in range(k))**0.5)
+                    d2 = max(1e-10, sum((r2[x]-m2)**2 for x in range(k))**0.5)
+                    row.append(round(num / (d1 * d2), 2))
+            matrix.append(row)
+        return matrix
+
+    # Current (last 90 days)
+    current = corr_matrix(total_rets - window, total_rets)
+    # Previous (90 days before that)
+    prev_end = max(0, total_rets - window)
+    prev_start = max(0, prev_end - window)
+    previous = corr_matrix(prev_start, prev_end) if prev_end - prev_start >= 30 else current
+
+    return {'labels': asset_keys, 'current': current, 'previous': previous}
+
+@app.route('/api/crossmarket')
+def api_crossmarket():
+    try:
+        ck = 'crossmarket_main'
+        now = datetime.datetime.now()
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+            return jsonify(_cache[ck])
+
+        ird = build_ird_data()
+        forex = build_forex_data()
+        carry = build_carry_data()
+        corr = build_correlation_matrix()
+
+        result = {
+            'status': 'ok',
+            'lastUpdate': datetime.date.today().isoformat(),
+            'ird': ird,
+            'forex': forex,
+            'carry': carry,
+            'correlation': corr
+        }
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return jsonify(result)
+    except Exception as e:
+        print('[CROSSMARKET] ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/crossmarket/refresh')
+def api_crossmarket_refresh():
+    cm_keys = [k for k in _cache if k.startswith('crossmarket_') or k.startswith('te_') or k.startswith('yf_')]
+    for k in cm_keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[CROSSMARKET] Cache cleared (' + str(len(cm_keys)) + ' keys), refetching...')
+    return api_crossmarket()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
