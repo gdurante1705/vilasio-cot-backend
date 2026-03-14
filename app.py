@@ -1449,12 +1449,13 @@ def fetch_yf_daily(symbol, years=2):
         return result
 
 def build_ird_data():
-    """Build Interest Rate Differential data for major forex pairs."""
-    # US 10Y from FRED (daily, 5 years for deep history)
+    """Build Interest Rate Differential data for major forex pairs.
+    Uses FRED OECD series for foreign yields and CPI indices."""
+    # US 10Y from FRED (daily, 5 years)
     us10y = fetch_fred('DGS10', 5)
     us10y_map = {o['date']: o['value'] for o in us10y}
 
-    # US CPI YoY (already have from macro — recompute from FRED)
+    # US CPI YoY from FRED index
     cpi_raw = fetch_fred('CPIAUCSL', 6)
     us_inf_map = {}
     cpi_by_date = {o['date']: o['value'] for o in cpi_raw}
@@ -1462,33 +1463,30 @@ def build_ird_data():
         dt = datetime.date.fromisoformat(d)
         prev = None
         for off in range(-15, 16):
-            ck = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
-            if ck in cpi_by_date:
-                prev = cpi_by_date[ck]
+            ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
+            if ck2 in cpi_by_date:
+                prev = cpi_by_date[ck2]
                 break
         if prev and prev > 0:
             us_inf_map[d] = round((cpi_by_date[d] - prev) / prev * 100, 2)
 
-    # Foreign yields + inflation from Trading Economics
+    # Foreign data from FRED (OECD series — monthly)
     pairs_config = {
         'EURUSD': {
-            'country': 'germany',
-            'yield_indicator': 'government bond 10y',
-            'inflation_indicator': 'inflation rate',
+            'yield_series': 'IRLTLT01DEM156N',   # Germany 10Y (monthly)
+            'cpi_series': 'DEUCPIALLMINMEI',      # Germany CPI index
             'fx_symbol': 'EURUSD=X',
             'label': 'EUR/USD'
         },
         'GBPUSD': {
-            'country': 'united kingdom',
-            'yield_indicator': 'government bond 10y',
-            'inflation_indicator': 'inflation rate',
+            'yield_series': 'IRLTLT01GBM156N',   # UK 10Y (monthly)
+            'cpi_series': 'GBRCPIALLMINMEI',      # UK CPI index
             'fx_symbol': 'GBPUSD=X',
             'label': 'GBP/USD'
         },
         'USDJPY': {
-            'country': 'japan',
-            'yield_indicator': 'government bond 10y',
-            'inflation_indicator': 'inflation rate',
+            'yield_series': 'IRLTLT01JPM156N',   # Japan 10Y (monthly)
+            'cpi_series': 'JPNCPIALLMINMEI',      # Japan CPI index
             'fx_symbol': 'USDJPY=X',
             'label': 'USD/JPY'
         }
@@ -1497,58 +1495,53 @@ def build_ird_data():
     ird_results = {}
     for pair_key, cfg in pairs_config.items():
         try:
-            # Fetch foreign yield + inflation from TE
-            te_yield = fetch_te('/historical/country/' + cfg['country'] + '/indicator/' + cfg['yield_indicator'] + '?start_date=' + (datetime.date.today() - datetime.timedelta(days=365*5)).isoformat())
-            te_inf = fetch_te('/historical/country/' + cfg['country'] + '/indicator/' + cfg['inflation_indicator'] + '?start_date=' + (datetime.date.today() - datetime.timedelta(days=365*6)).isoformat())
+            # Fetch foreign 10Y yield from FRED (OECD monthly series)
+            foreign_yield_raw = fetch_fred(cfg['yield_series'], 5)
+            foreign_yield_map = {o['date']: o['value'] for o in foreign_yield_raw}
+            print('[IRD] ' + pair_key + ' yield (' + cfg['yield_series'] + '): ' + str(len(foreign_yield_raw)) + ' obs')
 
-            # Build foreign yield map (monthly — TE returns monthly data)
-            foreign_yield_map = {}
-            if isinstance(te_yield, list):
-                for row in te_yield:
-                    d = (row.get('DateTime') or '')[:10]
-                    v = row.get('Value')
-                    if d and v is not None:
-                        foreign_yield_map[d] = float(v)
-
-            # Build foreign inflation map
+            # Fetch foreign CPI index from FRED and compute YoY
+            foreign_cpi_raw = fetch_fred(cfg['cpi_series'], 6)
+            foreign_cpi_by_date = {o['date']: o['value'] for o in foreign_cpi_raw}
             foreign_inf_map = {}
-            if isinstance(te_inf, list):
-                for row in te_inf:
-                    d = (row.get('DateTime') or '')[:10]
-                    v = row.get('Value')
-                    if d and v is not None:
-                        foreign_inf_map[d] = float(v)
+            for d in sorted(foreign_cpi_by_date.keys()):
+                dt = datetime.date.fromisoformat(d)
+                prev = None
+                for off in range(-15, 16):
+                    ck2 = (dt - datetime.timedelta(days=365) + datetime.timedelta(days=off)).isoformat()
+                    if ck2 in foreign_cpi_by_date:
+                        prev = foreign_cpi_by_date[ck2]
+                        break
+                if prev and prev > 0:
+                    foreign_inf_map[d] = round((foreign_cpi_by_date[d] - prev) / prev * 100, 2)
+            print('[IRD] ' + pair_key + ' inflation (' + cfg['cpi_series'] + '): ' + str(len(foreign_inf_map)) + ' YoY points')
 
             # Fetch forex price from yfinance
             fx = fetch_yf_weekly(cfg['fx_symbol'], 5)
 
-            # Build monthly spread series aligned on common dates
-            # Use monthly dates from foreign data (it's the limiting factor)
+            # Build monthly spread series on common dates
             spread_dates, spread_vals, fx_aligned = [], [], []
             fx_map = {d: v for d, v in zip(fx['dates'], fx['values'])}
 
             all_foreign_dates = sorted(set(foreign_yield_map.keys()) & set(foreign_inf_map.keys()))
             for fd in all_foreign_dates:
-                # Get US 10Y nearest to this date
                 us_y = nearest_val(us10y_map, fd, 15)
                 if us_y is None:
                     continue
-                # Get US inflation nearest to this date
                 us_i = nearest_val(us_inf_map, fd, 45)
                 if us_i is None:
                     continue
                 foreign_y = foreign_yield_map[fd]
                 foreign_i = foreign_inf_map[fd]
-                # Real yield = nominal - inflation
                 us_real = us_y - us_i
                 foreign_real = foreign_y - foreign_i
                 spread = round(foreign_real - us_real, 2)
                 spread_dates.append(fd)
                 spread_vals.append(spread)
-                # Align FX price
                 fx_v = nearest_val(fx_map, fd, 7)
                 fx_aligned.append(fx_v)
 
+            print('[IRD] ' + pair_key + ': ' + str(len(spread_dates)) + ' spread points')
             ird_results[pair_key] = {
                 'label': cfg['label'],
                 'dates': spread_dates,
@@ -1558,7 +1551,7 @@ def build_ird_data():
                 'latestFx': fx_aligned[-1] if fx_aligned else None
             }
         except Exception as e:
-            print('[IRD] ' + pair_key + ': ' + str(e))
+            print('[IRD] ' + pair_key + ' error: ' + str(e))
             ird_results[pair_key] = {
                 'label': cfg.get('label', pair_key),
                 'dates': [], 'spread': [], 'fxPrice': [],
@@ -1584,33 +1577,29 @@ def build_forex_data():
     return result
 
 def build_carry_data():
-    """Fetch central bank interest rates from Trading Economics."""
-    countries = {
-        'US': 'united states',
-        'EU': 'euro area',
-        'UK': 'united kingdom',
-        'JP': 'japan',
-        'CA': 'canada',
-        'AU': 'australia'
+    """Fetch central bank interest rates from FRED."""
+    # FRED series for central bank policy rates
+    rate_series = {
+        'US': 'FEDFUNDS',        # Fed Funds Effective Rate (monthly)
+        'EU': 'ECBMLFR',         # ECB Main Refinancing Rate
+        'UK': 'BOERUKM',         # Bank of England Rate
+        'JP': 'IRSTCB01JPM156N', # Japan Short-Term CB Rate (OECD)
+        'CA': 'IRSTCB01CAM156N', # Canada Short-Term CB Rate (OECD)
+        'AU': 'IRSTCB01AUM156N', # Australia Short-Term CB Rate (OECD)
     }
     rates = {}
-    for key, country in countries.items():
+    for key, series_id in rate_series.items():
         try:
-            data = fetch_te('/historical/country/' + country + '/indicator/interest rate?start_date=' + (datetime.date.today() - datetime.timedelta(days=365*5)).isoformat())
-            dates, vals = [], []
-            if isinstance(data, list):
-                for row in sorted(data, key=lambda x: x.get('DateTime', '')):
-                    d = (row.get('DateTime') or '')[:10]
-                    v = row.get('Value')
-                    if d and v is not None:
-                        dates.append(d)
-                        vals.append(float(v))
+            raw = fetch_fred(series_id, 5)
+            dates = [o['date'] for o in raw]
+            vals = [o['value'] for o in raw]
+            print('[CARRY] ' + key + ' (' + series_id + '): ' + str(len(raw)) + ' obs')
             rates[key] = {'dates': dates, 'values': vals, 'latest': vals[-1] if vals else None}
         except Exception as e:
-            print('[CARRY] ' + key + ': ' + str(e))
+            print('[CARRY] ' + key + ' error: ' + str(e))
             rates[key] = {'dates': [], 'values': [], 'latest': None}
 
-    # Compute differentials
+    # Compute differentials using nearest-value alignment
     diffs = {}
     us = rates.get('US', {})
     us_map = {d: v for d, v in zip(us.get('dates', []), us.get('values', []))}
@@ -1623,10 +1612,17 @@ def build_carry_data():
     ]:
         foreign = rates.get(foreign_key, {})
         f_map = {d: v for d, v in zip(foreign.get('dates', []), foreign.get('values', []))}
-        # Align on common dates
-        common = sorted(set(us_map.keys()) & set(f_map.keys()))
-        diff_dates = common
-        diff_vals = [round(us_map[d] - f_map[d], 2) for d in common]
+        # Use the shorter series dates as base, align the other with nearest val
+        if len(f_map) == 0 or len(us_map) == 0:
+            diffs[pair_key] = {'label': label, 'dates': [], 'values': [], 'latest': None}
+            continue
+        # Use foreign dates as base (usually monthly), find nearest US rate
+        diff_dates, diff_vals = [], []
+        for d in sorted(f_map.keys()):
+            us_v = nearest_val(us_map, d, 15)
+            if us_v is not None:
+                diff_dates.append(d)
+                diff_vals.append(round(us_v - f_map[d], 2))
         diffs[pair_key] = {
             'label': label,
             'dates': diff_dates,
