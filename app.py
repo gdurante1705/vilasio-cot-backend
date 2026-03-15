@@ -1690,28 +1690,33 @@ def build_earnings_data():
     filtered_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimated') or 0)), reverse=True)
     print('[EARNINGS] Upcoming in universe: ' + str(len(filtered_upcoming)))
 
-    # Batch quote for market caps (1 API call for all upcoming symbols)
-    upcoming_syms = [item['symbol'] for item in filtered_upcoming if item.get('symbol')]
-    mcap_map = {}
-    if upcoming_syms:
-        # FMP quote-short doesn't have marketCap, use batch-quote-short for prices
-        # Market cap not available in short quote — we'll skip mcap filter for S&P 500
-        # (all S&P 500 are >2.5B by definition, filter out >250B via known mega-caps if needed)
-        pass
-
+    # Fetch individual profiles for filtered upcoming (sector, marketCap, name)
     upcoming = []
     for item in filtered_upcoming:
         sym = item.get('symbol', '')
-        if not sym or sym not in profiles:
+        if not sym:
             continue
-        prof = profiles[sym]
-        sector = prof.get('sector', '')
+        # Fetch FMP profile (cached 24h via CACHE_TTL)
+        prof_data = fetch_fmp('profile?symbol=' + sym)
+        if isinstance(prof_data, list) and prof_data:
+            prof_detail = prof_data[0]
+        elif isinstance(prof_data, dict) and prof_data.get('symbol'):
+            prof_detail = prof_data
+        else:
+            # Fall back to screener/hardcoded data
+            prof_detail = profiles.get(sym, {})
+        mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
+        if mcap and (mcap < 2.5e9 or mcap > 250e9):
+            continue
+        name = prof_detail.get('companyName', '') or prof_detail.get('name', '') or profiles.get(sym, {}).get('name', sym)
+        sector = prof_detail.get('sector', '') or profiles.get(sym, {}).get('sector', '')
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
         sector_trend_info = market_trend.get(sector_etf, {})
         upcoming.append({
             'symbol': sym,
-            'name': prof.get('name', sym),
+            'name': name,
             'date': item.get('date', ''),
+            'marketCap': round(mcap) if mcap else None,
             'sector': sector,
             'sectorEtf': sector_etf,
             'sectorTrend': sector_trend_info.get('trend', ''),
@@ -1754,16 +1759,27 @@ def build_earnings_data():
     surprise_candidates.sort(key=lambda x: abs(float(x.get('epsEstimated') or 0)), reverse=True)
     print('[EARNINGS] Positive surprises in universe: ' + str(len(surprise_candidates)))
 
-    # For each surprise candidate: fetch OHLC candles + compute signal
+    # For each surprise candidate: fetch profile + OHLC candles + compute signal
     signals = []
     for item in surprise_candidates:
         sym = item.get('symbol', '')
         earnings_date = item.get('date', '')
-        if not sym or not earnings_date or sym not in profiles:
+        if not sym or not earnings_date:
             continue
 
-        prof = profiles[sym]
-        sector = prof.get('sector', '')
+        # Fetch FMP profile for accurate sector + market cap
+        prof_data = fetch_fmp('profile?symbol=' + sym)
+        if isinstance(prof_data, list) and prof_data:
+            prof_detail = prof_data[0]
+        elif isinstance(prof_data, dict) and prof_data.get('symbol'):
+            prof_detail = prof_data
+        else:
+            prof_detail = profiles.get(sym, {})
+        mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
+        if mcap and (mcap < 2.5e9 or mcap > 250e9):
+            continue
+        name = prof_detail.get('companyName', '') or prof_detail.get('name', '') or profiles.get(sym, {}).get('name', sym)
+        sector = prof_detail.get('sector', '') or profiles.get(sym, {}).get('sector', '')
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
         sector_trend_data = market_trend.get(sector_etf, {})
         spx_trend_data = market_trend.get('SPX', {})
@@ -1838,12 +1854,25 @@ def build_earnings_data():
         rr = 3.0
 
         gap_filled = current_price < post_open if gap_pct > 0 else current_price > post_open
+
+        # --- Signal invalidation checks (from Playbook) ---
+        # 1. Price broke below earnings candle low → setup dead
+        if current_price < earnings_low:
+            continue
+        # 2. Drift heavily negative (<-3%) → market rejected the surprise
+        if drift_pct < -3:
+            continue
+        # 3. Price below pre-earnings close → entire move cancelled
+        if current_price < pre_close:
+            continue
+
         is_active = days_since < 30 and not gap_filled
 
         signals.append({
             'symbol': sym,
-            'name': prof.get('name', sym),
+            'name': name,
             'earningsDate': earnings_date,
+            'marketCap': round(mcap) if mcap else None,
             'sector': sector,
             'sectorEtf': sector_etf,
             'sectorTrend': s_trend,
@@ -1880,12 +1909,22 @@ def build_earnings_data():
             for sig in signals:
                 if sig['symbol'] in price_map and price_map[sig['symbol']]:
                     sig['currentPrice'] = round(price_map[sig['symbol']], 2)
-                    # Recalculate drift and gap filled with live price
+                    cp = sig['currentPrice']
+                    # Recalculate drift with live price
                     if sig['postOpen'] and sig['postOpen'] != 0:
-                        sig['driftPct'] = round((sig['currentPrice'] - sig['postOpen']) / sig['postOpen'] * 100, 2)
-                    sig['gapFilled'] = sig['currentPrice'] < sig['postOpen'] if sig['gapPct'] > 0 else sig['currentPrice'] > sig['postOpen']
+                        sig['driftPct'] = round((cp - sig['postOpen']) / sig['postOpen'] * 100, 2)
+                    sig['gapFilled'] = cp < sig['postOpen'] if sig['gapPct'] > 0 else cp > sig['postOpen']
                     sig['isActive'] = sig['daysSinceEarnings'] < 30 and not sig['gapFilled']
-            print('[EARNINGS] Batch quote updated ' + str(len(price_map)) + ' active signals')
+            print('[EARNINGS] Batch quote updated ' + str(len(price_map)) + ' signals')
+
+    # Remove signals invalidated by live prices
+    before_count = len(signals)
+    signals = [s for s in signals
+               if s['currentPrice'] >= s['earningsLow']
+               and s['driftPct'] >= -3
+               and s['currentPrice'] >= s['preClose']]
+    if len(signals) < before_count:
+        print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated signals after live price update')
 
     print('[FMP] Total API calls this build: ' + str(_fmp_call_count))
 
