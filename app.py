@@ -1681,9 +1681,12 @@ def build_earnings_data():
     to_date = (today + datetime.timedelta(days=14)).isoformat()
     cal_data = fetch_fmp('earnings-calendar?from=' + from_date + '&to=' + to_date)
     raw_upcoming = cal_data if isinstance(cal_data, list) else []
-    print('[EARNINGS] Raw upcoming: ' + str(len(raw_upcoming)))
+    print('[EARNINGS] Raw upcoming from FMP (before any filter): ' + str(len(raw_upcoming)))
     if raw_upcoming:
-        print('[EARNINGS] Sample upcoming item: ' + str(raw_upcoming[0]))
+        print('[EARNINGS] Sample upcoming item: ' + str(raw_upcoming[0])[:200])
+        # Log first 20 symbols to see what FMP returns
+        first_syms = [item.get('symbol', '?') for item in raw_upcoming[:20]]
+        print('[EARNINGS] First 20 symbols: ' + str(first_syms))
 
     # Pre-filter: exclude known mega caps (>250B) to avoid wasting profile calls
     _MEGA_CAPS = {
@@ -1694,7 +1697,9 @@ def build_earnings_data():
         'CMCSA','PFE','NOW','IBM','GE','CAT','RTX','UNP','HON','LOW','SPGI',
         'DE','BA','MMM','GS','MS','BLK','AXP','SCHW','C','USB','PNC',
     }
+    excluded = [item.get('symbol') for item in raw_upcoming if item.get('symbol', '') in _MEGA_CAPS]
     raw_upcoming = [item for item in raw_upcoming if item.get('symbol', '') not in _MEGA_CAPS]
+    print('[EARNINGS] Mega-cap excluded (' + str(len(excluded)) + '): ' + str(excluded[:10]))
     print('[EARNINGS] After mega-cap exclusion: ' + str(len(raw_upcoming)))
 
     # Sort by date (chronological) so we get a good spread of upcoming stocks
