@@ -1738,6 +1738,26 @@ def build_earnings_data():
                 seen.add(u['symbol'])
                 unique.append(u)
         upcoming = unique
+
+        # Cross-reference with Finnhub calendar for exact earnings dates
+        from_date = today_str
+        to_date = (today + datetime.timedelta(days=14)).isoformat()
+        fh_cal = fetch_finnhub('calendar/earnings?from=' + from_date + '&to=' + to_date)
+        fh_list = fh_cal.get('earningsCalendar', []) if isinstance(fh_cal, dict) else []
+        fh_dates = {}
+        for item in fh_list:
+            s = item.get('symbol', '')
+            if s and item.get('date'):
+                fh_dates[s] = item['date']
+        matched = 0
+        for u in upcoming:
+            d = fh_dates.get(u['symbol'], '')
+            if d:
+                u['date'] = d
+                matched += 1
+        print('[EARNINGS] Finnhub dates matched: ' + str(matched) + '/' + str(len(upcoming)))
+
+        upcoming.sort(key=lambda x: x.get('date', 'z'))
         _cache[ck_upcoming] = upcoming
         _cache_time[ck_upcoming] = now
     print('[EARNINGS] Final upcoming: ' + str(len(upcoming)))
