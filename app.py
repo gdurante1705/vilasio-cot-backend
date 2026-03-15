@@ -1530,6 +1530,7 @@ import time as _time
 FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
 FINNHUB_BASE = 'https://finnhub.io/api/v1'
 CACHE_TTL_24H = 3600 * 24
+CACHE_TTL_7D = 3600 * 24 * 7
 
 SECTOR_ETF_MAP = {
     'Technology': 'XLK', 'Financial Services': 'XLF', 'Energy': 'XLE',
@@ -1558,6 +1559,69 @@ def fetch_finnhub(endpoint):
         print('[FINNHUB] ' + endpoint[:50] + ': ' + str(e))
         return _cache.get(ck, {})
 
+def get_valid_symbols():
+    """Return a set of S&P 500 + S&P 400 MidCap constituents (cached 7 days).
+    These are all NYSE/NASDAQ, 2.5B+ market cap — used as fast pre-filter
+    so we never waste Finnhub profile calls on stocks that won't qualify."""
+    ck = 'valid_symbols_set'
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_7D:
+        return _cache[ck]
+
+    symbols = set()
+
+    # Try Finnhub index constituents first
+    for idx_sym in ['^GSPC', '^SP400']:
+        data = fetch_finnhub('index/constituents?symbol=' + idx_sym)
+        if isinstance(data, dict) and data.get('constituents'):
+            symbols.update(data['constituents'])
+            print('[EARNINGS] Index ' + idx_sym + ': ' + str(len(data['constituents'])) + ' constituents')
+
+    # If Finnhub returned enough, cache and return
+    if len(symbols) >= 400:
+        _cache[ck] = symbols
+        _cache_time[ck] = now
+        print('[EARNINGS] Valid symbols from indices: ' + str(len(symbols)))
+        return symbols
+
+    # Fallback: use yfinance to fetch S&P 500 tickers from Wikipedia table
+    print('[EARNINGS] Finnhub index fetch insufficient (' + str(len(symbols)) + '), using Wikipedia fallback...')
+    try:
+        import io, csv
+        sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        req = urllib.request.Request(sp500_url, headers={'User-Agent': 'Vilasio/3.7'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode('utf-8')
+        # Parse first table — extract ticker symbols from first <td> of each row
+        import re
+        rows = re.findall(r'<tr>\s*<td[^>]*><a[^>]*>([A-Z.]+)</a>', html)
+        if rows:
+            symbols.update(t.replace('.', '-') for t in rows)  # BRK.B -> BRK-B (Yahoo/Finnhub format)
+            print('[EARNINGS] Wikipedia S&P 500: ' + str(len(rows)) + ' tickers')
+    except Exception as e:
+        print('[EARNINGS] Wikipedia fallback failed: ' + str(e))
+
+    # If still not enough, try S&P 400 from Wikipedia
+    if len(symbols) < 600:
+        try:
+            sp400_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies'
+            req = urllib.request.Request(sp400_url, headers={'User-Agent': 'Vilasio/3.7'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode('utf-8')
+            import re
+            rows = re.findall(r'<tr>\s*<td[^>]*><a[^>]*>([A-Z.]+)</a>', html)
+            if rows:
+                symbols.update(t.replace('.', '-') for t in rows)
+                print('[EARNINGS] Wikipedia S&P 400: ' + str(len(rows)) + ' tickers')
+        except Exception as e:
+            print('[EARNINGS] Wikipedia S&P 400 fallback failed: ' + str(e))
+
+    _cache[ck] = symbols
+    _cache_time[ck] = now
+    print('[EARNINGS] Valid symbols total: ' + str(len(symbols)))
+    return symbols
+
+
 def build_earnings_data():
     """Build PEAD earnings intelligence data."""
     if not FINNHUB_API_KEY:
@@ -1566,8 +1630,12 @@ def build_earnings_data():
     today = datetime.date.today()
     today_str = today.isoformat()
 
-    # --- Step 3 first: Market trend (SPX + sector ETFs) ---
-    print('[EARNINGS] Step 3: Fetching market trends...')
+    # --- Step 0: Pre-fetch valid symbol universe (S&P 500 + S&P 400) ---
+    valid_syms = get_valid_symbols()
+    print('[EARNINGS] Valid symbol universe: ' + str(len(valid_syms)))
+
+    # --- Step 1 (was 3): Market trend (SPX + sector ETFs) ---
+    print('[EARNINGS] Step 1: Fetching market trends...')
     import yfinance as yf
     trend_symbols = ['^GSPC'] + list(set(SECTOR_ETF_MAP.values()))
     market_trend = {}
@@ -1588,35 +1656,31 @@ def build_earnings_data():
             print('[EARNINGS] trend ' + sym + ': ' + str(e))
     print('[EARNINGS] Trends loaded: ' + str(len(market_trend)))
 
-    # --- Step 1: Upcoming earnings (next 14 days) ---
-    print('[EARNINGS] Step 1: Upcoming earnings...')
+    # --- Step 2: Upcoming earnings (next 14 days) ---
+    print('[EARNINGS] Step 2: Upcoming earnings...')
     from_date = today_str
     to_date = (today + datetime.timedelta(days=14)).isoformat()
     cal_data = fetch_finnhub('calendar/earnings?from=' + from_date + '&to=' + to_date)
     raw_upcoming = cal_data.get('earningsCalendar', []) if isinstance(cal_data, dict) else []
-    # Sort by epsEstimate descending — higher EPS estimates tend to be larger, more liquid stocks
-    raw_upcoming.sort(key=lambda x: float(x.get('epsEstimate') or 0), reverse=True)
     print('[EARNINGS] Raw upcoming: ' + str(len(raw_upcoming)))
 
+    # Fast filter: only process stocks in our valid universe
+    filtered_upcoming = [item for item in raw_upcoming if item.get('symbol', '') in valid_syms]
+    filtered_upcoming.sort(key=lambda x: float(x.get('epsEstimate') or 0), reverse=True)
+    print('[EARNINGS] Upcoming after universe filter: ' + str(len(filtered_upcoming)))
+
+    # Now fetch profiles ONLY for the filtered stocks (typically 10-40 instead of 80)
     upcoming = []
-    processed = 0
-    for item in raw_upcoming:
-        if processed >= 80:
-            break
+    for item in filtered_upcoming:
         sym = item.get('symbol', '')
         if not sym:
             continue
-        # Quick filter by exchange suffix
         profile = fetch_finnhub('stock/profile2?symbol=' + sym)
-        processed += 1
         if not profile or not isinstance(profile, dict):
             continue
-        exchange = profile.get('exchange', '')
-        mcap = profile.get('marketCapitalization', 0) or 0  # in millions
+        mcap = profile.get('marketCapitalization', 0) or 0
         mcap_usd = mcap * 1e6
         if mcap_usd < 2.5e9 or mcap_usd > 250e9:
-            continue
-        if not any(ex in exchange.upper() for ex in ['NYSE', 'NASDAQ', 'NEW YORK']):
             continue
         upcoming.append({
             'symbol': sym,
@@ -1629,18 +1693,21 @@ def build_earnings_data():
             'previousSurprise': round(float(item.get('surprisePercent', 0) or 0), 2)
         })
     upcoming.sort(key=lambda x: x.get('date', ''))
-    print('[EARNINGS] Filtered upcoming: ' + str(len(upcoming)))
+    print('[EARNINGS] Final upcoming: ' + str(len(upcoming)))
 
-    # --- Step 2: Recent earnings with surprise (last 21 days) ---
-    print('[EARNINGS] Step 2: Recent earnings...')
+    # --- Step 3: Recent earnings with surprise (last 21 days) ---
+    print('[EARNINGS] Step 3: Recent earnings...')
     recent_from = (today - datetime.timedelta(days=21)).isoformat()
     recent_cal = fetch_finnhub('calendar/earnings?from=' + recent_from + '&to=' + today_str)
     raw_recent = recent_cal.get('earningsCalendar', []) if isinstance(recent_cal, dict) else []
     print('[EARNINGS] Raw recent: ' + str(len(raw_recent)))
 
-    # Filter for positive surprises first (before expensive profile calls)
+    # Fast filter: universe + positive surprise (no profile call needed)
     surprise_candidates = []
     for item in raw_recent:
+        sym = item.get('symbol', '')
+        if sym not in valid_syms:
+            continue
         actual = item.get('epsActual')
         estimate = item.get('epsEstimate')
         if actual is None or estimate is None:
@@ -1653,30 +1720,23 @@ def build_earnings_data():
         if actual_f <= estimate_f:
             continue
         surprise_candidates.append(item)
-    # Sort by epsEstimate descending so we profile the most important stocks first
     surprise_candidates.sort(key=lambda x: float(x.get('epsEstimate') or 0), reverse=True)
-    print('[EARNINGS] Positive surprises: ' + str(len(surprise_candidates)))
+    print('[EARNINGS] Positive surprises in universe: ' + str(len(surprise_candidates)))
 
+    # Now fetch profiles + candles ONLY for valid surprise stocks
     signals = []
-    processed = 0
     for item in surprise_candidates:
-        if processed >= 60:
-            break
         sym = item.get('symbol', '')
         earnings_date = item.get('date', '')
         if not sym or not earnings_date:
             continue
 
         profile = fetch_finnhub('stock/profile2?symbol=' + sym)
-        processed += 1
         if not profile or not isinstance(profile, dict):
             continue
-        exchange = profile.get('exchange', '')
         mcap = profile.get('marketCapitalization', 0) or 0
         mcap_usd = mcap * 1e6
         if mcap_usd < 2.5e9 or mcap_usd > 250e9:
-            continue
-        if not any(ex in exchange.upper() for ex in ['NYSE', 'NASDAQ', 'NEW YORK']):
             continue
 
         sector = profile.get('finnhubIndustry', '')
@@ -1691,9 +1751,6 @@ def build_earnings_data():
 
         # Fetch candles
         e_dt = datetime.date.fromisoformat(earnings_date)
-        candle_from = int((e_dt - datetime.timedelta(days=5)).strftime('%s')) if hasattr(e_dt, 'strftime') else int(datetime.datetime(e_dt.year, e_dt.month, e_dt.day).timestamp()) - 5*86400
-        candle_to = int(datetime.datetime.now().timestamp())
-        # Use epoch timestamps
         try:
             from_ts = int(datetime.datetime(e_dt.year, e_dt.month, e_dt.day).timestamp()) - 5 * 86400
             to_ts = int(datetime.datetime.now().timestamp())
@@ -1716,7 +1773,6 @@ def build_earnings_data():
                 e_idx = i
                 break
         if e_idx is None:
-            # Try day after
             e_next = (e_dt + datetime.timedelta(days=1)).isoformat()
             for i, d in enumerate(c_dates):
                 if d == e_next:
@@ -1818,7 +1874,7 @@ def api_earnings():
 
 @app.route('/api/earnings/refresh')
 def api_earnings_refresh():
-    keys = [k for k in _cache if k.startswith('earnings_') or k.startswith('fh_')]
+    keys = [k for k in _cache if k.startswith('earnings_') or k.startswith('fh_') or k == 'valid_symbols_set']
     for k in keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
