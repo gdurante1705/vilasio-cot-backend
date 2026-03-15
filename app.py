@@ -1709,76 +1709,92 @@ def build_earnings_data():
             print('[EARNINGS] trend ' + sym + ': ' + str(e))
     print('[EARNINGS] Trends loaded: ' + str(len(market_trend)))
 
-    # --- Step 2: Upcoming earnings (Finnhub calendar → FMP profiles) ---
-    print('[EARNINGS] Step 2: Upcoming earnings (Finnhub calendar)...')
-    from_date = today_str
-    to_date = (today + datetime.timedelta(days=14)).isoformat()
-    cal_data = fetch_finnhub('calendar/earnings?from=' + from_date + '&to=' + to_date)
-    raw_upcoming = cal_data.get('earningsCalendar', []) if isinstance(cal_data, dict) else []
-    print('[EARNINGS] Finnhub raw upcoming: ' + str(len(raw_upcoming)))
-    if raw_upcoming:
-        print('[EARNINGS] Sample: ' + str(raw_upcoming[0])[:200])
-
-    # Pre-filter: exclude mega caps, dots (foreign), empty symbols
-    raw_upcoming = [item for item in raw_upcoming
-                    if item.get('symbol')
-                    and '.' not in item['symbol']
-                    and item['symbol'] not in _MEGA_CAPS]
-    print('[EARNINGS] After pre-filter (no mega, no dots): ' + str(len(raw_upcoming)))
-
-    # Priority sort: S&P 500 universe first, then the rest
-    # Within each group, sort by abs(epsEstimate) desc
-    sp500_upcoming = [item for item in raw_upcoming if item.get('symbol', '') in valid_syms]
-    other_upcoming = [item for item in raw_upcoming if item.get('symbol', '') not in valid_syms]
-    sp500_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
-    other_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
-    raw_upcoming = sp500_upcoming + other_upcoming
-    print('[EARNINGS] S&P 500 in calendar: ' + str(len(sp500_upcoming)) + ', other: ' + str(len(other_upcoming)))
-
-    # Log first 50 symbols to verify coverage
-    first50 = [item.get('symbol', '?') for item in raw_upcoming[:50]]
-    print('[EARNINGS] First 50 (S&P500 first): ' + str(first50))
-
-    # Fetch FMP profiles for top 40 (S&P 500 first, so 40 is enough)
-    upcoming = []
-    profiled = 0
-    for item in raw_upcoming:
-        if profiled >= 40:
-            break
-        sym = item.get('symbol', '')
-        prof_data = fetch_fmp('profile?symbol=' + sym)
-        profiled += 1
-        if isinstance(prof_data, list) and prof_data:
-            prof_detail = prof_data[0]
-        elif isinstance(prof_data, dict) and prof_data.get('symbol'):
-            prof_detail = prof_data
-        else:
-            continue
-        exchange = (prof_detail.get('exchangeShortName', '') or prof_detail.get('exchange', '')).upper()
-        if exchange not in ('NYSE', 'NASDAQ'):
-            continue
-        mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
-        if not mcap or mcap < 10e9 or mcap > 200e9:
-            continue
-        name = prof_detail.get('companyName', '') or prof_detail.get('name', sym)
-        sector = prof_detail.get('sector', '')
-        sector_etf = SECTOR_ETF_MAP.get(sector, '')
-        sector_trend_info = market_trend.get(sector_etf, {})
-        upcoming.append({
-            'symbol': sym,
-            'name': name,
-            'date': item.get('date', ''),
-            'marketCap': round(mcap),
-            'sector': sector,
-            'sectorEtf': sector_etf,
-            'sectorTrend': sector_trend_info.get('trend', ''),
-            'epsEstimate': item.get('epsEstimate'),  # Finnhub field name
-            'revenueEstimate': item.get('revenueEstimate'),
-            'quarter': item.get('quarter'),
-            'year': item.get('year'),
-        })
-    print('[EARNINGS] Profiled ' + str(profiled) + ' upcoming, passed: ' + str(len(upcoming)))
-    upcoming.sort(key=lambda x: x.get('date', ''))
+    # --- Step 2: Upcoming earnings via Finviz screener (no FMP/Finnhub calls) ---
+    print('[EARNINGS] Step 2: Upcoming earnings (Finviz screener)...')
+    ck_upcoming = 'earnings_finviz_upcoming'
+    now = datetime.datetime.now()
+    if ck_upcoming in _cache and (now - _cache_time[ck_upcoming]).total_seconds() < CACHE_TTL:
+        upcoming = _cache[ck_upcoming]
+        print('[EARNINGS] Upcoming from cache: ' + str(len(upcoming)))
+    else:
+        # Finviz sector names → our SECTOR_ETF_MAP keys
+        _FINVIZ_SECTOR_MAP = {
+            'Technology': 'Technology',
+            'Financial': 'Financial Services',
+            'Energy': 'Energy',
+            'Healthcare': 'Healthcare',
+            'Consumer Cyclical': 'Consumer Cyclical',
+            'Consumer Defensive': 'Consumer Defensive',
+            'Industrials': 'Industrials',
+            'Communication Services': 'Communication Services',
+            'Real Estate': 'Real Estate',
+            'Basic Materials': 'Basic Materials',
+            'Utilities': 'Utilities',
+        }
+        upcoming = []
+        try:
+            from finvizfinance.screener.overview import Overview
+            for exch in ['NYSE', 'NASDAQ']:
+                fov = Overview()
+                fov.set_filter(filters_dict={
+                    'Exchange': exch,
+                    'Market Cap.': 'Large ($10bln to $200bln)',
+                    'Earnings Date': 'Next Week',
+                })
+                df = fov.screener_view()
+                if df is not None and not df.empty:
+                    print('[EARNINGS] Finviz ' + exch + ': ' + str(len(df)) + ' stocks')
+                    for _, row in df.iterrows():
+                        sym = str(row.get('Ticker', ''))
+                        if not sym:
+                            continue
+                        raw_sector = str(row.get('Sector', ''))
+                        sector = _FINVIZ_SECTOR_MAP.get(raw_sector, raw_sector)
+                        sector_etf = SECTOR_ETF_MAP.get(sector, '')
+                        sector_trend_info = market_trend.get(sector_etf, {})
+                        # Parse market cap string (e.g. "53.1B" or "12.3B")
+                        mcap_raw = row.get('Market Cap', 0)
+                        if isinstance(mcap_raw, str):
+                            mcap_raw = mcap_raw.replace(',', '')
+                            if mcap_raw.endswith('B'):
+                                mcap_val = float(mcap_raw[:-1]) * 1e9
+                            elif mcap_raw.endswith('M'):
+                                mcap_val = float(mcap_raw[:-1]) * 1e6
+                            else:
+                                try:
+                                    mcap_val = float(mcap_raw)
+                                except:
+                                    mcap_val = 0
+                        else:
+                            mcap_val = float(mcap_raw or 0)
+                        upcoming.append({
+                            'symbol': sym,
+                            'name': str(row.get('Company', sym)),
+                            'date': '',  # Finviz doesn't give exact date in screener
+                            'marketCap': round(mcap_val) if mcap_val else None,
+                            'sector': sector,
+                            'sectorEtf': sector_etf,
+                            'sectorTrend': sector_trend_info.get('trend', ''),
+                            'epsEstimate': None,
+                            'revenueEstimate': None,
+                            'quarter': None,
+                            'year': None,
+                        })
+                else:
+                    print('[EARNINGS] Finviz ' + exch + ': 0 stocks')
+        except Exception as e:
+            print('[EARNINGS] Finviz screener error: ' + str(e))
+            import traceback; traceback.print_exc()
+        # Deduplicate by symbol
+        seen = set()
+        unique = []
+        for u in upcoming:
+            if u['symbol'] not in seen:
+                seen.add(u['symbol'])
+                unique.append(u)
+        upcoming = unique
+        _cache[ck_upcoming] = upcoming
+        _cache_time[ck_upcoming] = now
     print('[EARNINGS] Final upcoming: ' + str(len(upcoming)))
 
     # --- Step 3: Recent earnings with positive surprise (Finnhub calendar → FMP profiles + candles) ---
