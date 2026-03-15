@@ -1561,26 +1561,78 @@ def fetch_fmp(endpoint):
         return _cache.get(ck, [])
 
 
-def get_sp500_profiles():
-    """Fetch S&P 500 constituents from FMP (cached 7 days).
-    Returns dict {symbol: {name, sector, subSector}}."""
-    ck = 'fmp_sp500_profiles'
+def get_stock_universe():
+    """Fetch NYSE/NASDAQ stocks with 2.5B-250B market cap (cached 7 days).
+    Uses FMP company-screener. Falls back to hardcoded S&P 500 list.
+    Returns dict {symbol: {name, sector, marketCap}}."""
+    ck = 'fmp_stock_universe'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_7D:
         return _cache[ck]
 
-    data = fetch_fmp('sp500-constituent')
     profiles = {}
-    if isinstance(data, list):
+
+    # Try FMP company-screener (1 call, returns up to 1000 stocks)
+    data = fetch_fmp('company-screener?exchange=NASDAQ,NYSE&marketCapMoreThan=2500000000&marketCapLowerThan=250000000000&limit=1000')
+    print('[EARNINGS] Screener response: type=' + type(data).__name__ + ' len=' + str(len(data) if isinstance(data, list) else 'N/A'))
+    if isinstance(data, list) and len(data) > 0:
+        print('[EARNINGS] Screener sample: ' + str(data[0])[:200])
         for item in data:
             sym = item.get('symbol', '')
             if sym:
                 profiles[sym] = {
-                    'name': item.get('name', sym),
+                    'name': item.get('companyName', '') or item.get('name', sym),
                     'sector': item.get('sector', ''),
-                    'subSector': item.get('subSector', ''),
+                    'marketCap': item.get('marketCap', 0),
                 }
-    print('[EARNINGS] S&P 500 universe loaded: ' + str(len(profiles)) + ' stocks')
+
+    if len(profiles) >= 100:
+        print('[EARNINGS] Universe from screener: ' + str(len(profiles)) + ' stocks')
+        _cache[ck] = profiles
+        _cache_time[ck] = now
+        return profiles
+
+    # Fallback: hardcoded S&P 500 tickers (as of March 2026)
+    print('[EARNINGS] Screener returned ' + str(len(profiles)) + ' stocks, using hardcoded S&P 500 fallback')
+    _SP500 = {
+        'AAPL','ABBV','ABT','ACN','ADBE','ADI','ADM','ADP','ADSK','AEE','AEP','AES','AFL','AIG','AIZ',
+        'AJG','AKAM','ALB','ALGN','ALK','ALL','ALLE','AMAT','AMCR','AMD','AME','AMGN','AMP','AMT','AMZN',
+        'ANET','ANSS','AON','AOS','APA','APD','APH','APTV','ARE','ATO','ATVI','AVB','AVGO','AVY','AWK',
+        'AXP','AZO','BA','BAC','BAX','BBWI','BBY','BDX','BEN','BF-B','BIO','BIIB','BK','BKNG','BKR',
+        'BLK','BMY','BR','BRK-B','BRO','BSX','BWA','BXP','C','CAG','CAH','CARR','CAT','CB','CBOE',
+        'CBRE','CCI','CCL','CDAY','CDNS','CDW','CE','CEG','CF','CFG','CHD','CHRW','CHTR','CI','CINF',
+        'CL','CLX','CMA','CMCSA','CME','CMG','CMI','CMS','CNC','CNP','COF','COO','COP','COST','CPB',
+        'CPRT','CPT','CRL','CRM','CSCO','CSGP','CSX','CTAS','CTLT','CTRA','CTSH','CTVA','CVS','CVX',
+        'CZR','D','DAL','DD','DE','DFS','DG','DGX','DHI','DHR','DIS','DISH','DLR','DLTR','DOV',
+        'DOW','DPZ','DRI','DTE','DUK','DVA','DVN','DXC','DXCM','EA','EBAY','ECL','ED','EFX','EIX',
+        'EL','EMN','EMR','ENPH','EOG','EPAM','EQIX','EQR','EQT','ES','ESS','ETN','ETR','ETSY','EVRG',
+        'EW','EXC','EXPD','EXPE','EXR','F','FANG','FAST','FBHS','FCX','FDS','FDX','FE','FFIV','FIS',
+        'FISV','FITB','FLT','FMC','FOX','FOXA','FRC','FRT','FTNT','FTV','GD','GE','GEHC','GEN','GILD',
+        'GIS','GL','GLW','GM','GNRC','GOOG','GOOGL','GPC','GPN','GRMN','GS','GWW','HAL','HAS','HBAN',
+        'HCA','HD','HOLX','HON','HPE','HPQ','HRL','HSIC','HST','HSY','HUM','HWM','IBM','ICE','IDXX',
+        'IEX','IFF','ILMN','INCY','INTC','INTU','INVH','IP','IPG','IQV','IR','IRM','ISRG','IT','ITW',
+        'IVZ','J','JBHT','JCI','JKHY','JNJ','JNPR','JPM','K','KDP','KEY','KEYS','KHC','KIM','KLAC',
+        'KMB','KMI','KMX','KO','KR','L','LDOS','LEN','LH','LHX','LIN','LKQ','LLY','LMT','LNC',
+        'LNT','LOW','LRCX','LUMN','LUV','LVS','LW','LYB','LYV','MA','MAA','MAR','MAS','MCD','MCHP',
+        'MCK','MCO','MDLZ','MDT','MET','META','MGM','MHK','MKC','MKTX','MLM','MMC','MMM','MNST','MO',
+        'MOH','MOS','MPC','MPWR','MRK','MRNA','MRO','MS','MSCI','MSFT','MSI','MTB','MTCH','MTD','MU',
+        'NCLH','NDAQ','NDSN','NEE','NEM','NFLX','NI','NKE','NOC','NOW','NRG','NSC','NTAP','NTRS','NUE',
+        'NVDA','NVR','NWL','NWS','NWSA','NXPI','O','ODFL','OGN','OKE','OMC','ON','ORCL','ORLY','OTIS',
+        'OXY','PARA','PAYC','PAYX','PCAR','PCG','PEAK','PEG','PEP','PFE','PFG','PG','PGR','PH','PHM',
+        'PKG','PKI','PLD','PM','PNC','PNR','PNW','POOL','PPG','PPL','PRU','PSA','PSX','PTC','PVH',
+        'PWR','PXD','PYPL','QCOM','QRVO','RCL','RE','REG','REGN','RF','RHI','RJF','RL','RMD','ROK',
+        'ROL','ROP','ROST','RSG','RTX','SBAC','SBNY','SBUX','SCHW','SEE','SHW','SIVB','SJM','SLB',
+        'SNA','SNPS','SO','SPG','SPGI','SRE','STE','STT','STX','STZ','SWK','SWKS','SYF','SYK','SYY',
+        'T','TAP','TDG','TDY','TECH','TEL','TER','TFC','TFX','TGT','TJX','TMO','TMUS','TPR','TRGP',
+        'TRMB','TROW','TRV','TSCO','TSLA','TSN','TT','TTWO','TXN','TXT','TYL','UAL','UDR','UHS',
+        'ULTA','UNH','UNP','UPS','URI','USB','V','VFC','VICI','VLO','VMC','VNO','VRSK','VRSN','VRTX',
+        'VTR','VTRS','VZ','WAB','WAT','WBA','WBD','WDC','WEC','WELL','WFC','WHR','WM','WMB','WMT',
+        'WRB','WRK','WST','WTW','WY','WYNN','XEL','XOM','XRAY','XYL','YUM','ZBH','ZBRA','ZION','ZTS',
+    }
+    for sym in _SP500:
+        if sym not in profiles:
+            profiles[sym] = {'name': sym, 'sector': '', 'marketCap': 0}
+    print('[EARNINGS] Universe with fallback: ' + str(len(profiles)) + ' stocks')
     _cache[ck] = profiles
     _cache_time[ck] = now
     return profiles
@@ -1597,10 +1649,10 @@ def build_earnings_data():
     today = datetime.date.today()
     today_str = today.isoformat()
 
-    # --- Step 0: S&P 500 universe (1 API call, cached 7 days) ---
-    profiles = get_sp500_profiles()
+    # --- Step 0: Stock universe (1 API call, cached 7 days) ---
+    profiles = get_stock_universe()
     valid_syms = set(profiles.keys())
-    print('[EARNINGS] Step 0: Universe = ' + str(len(valid_syms)) + ' S&P 500 stocks')
+    print('[EARNINGS] Step 0: Universe = ' + str(len(valid_syms)) + ' stocks')
 
     # --- Step 1: Market trends (SPX + sector ETFs via yfinance, no FMP calls) ---
     print('[EARNINGS] Step 1: Fetching market trends...')
@@ -1636,7 +1688,7 @@ def build_earnings_data():
     # Fast filter: only S&P 500 stocks
     filtered_upcoming = [item for item in raw_upcoming if item.get('symbol', '') in valid_syms]
     filtered_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimated') or 0)), reverse=True)
-    print('[EARNINGS] Upcoming in S&P 500: ' + str(len(filtered_upcoming)))
+    print('[EARNINGS] Upcoming in universe: ' + str(len(filtered_upcoming)))
 
     # Batch quote for market caps (1 API call for all upcoming symbols)
     upcoming_syms = [item['symbol'] for item in filtered_upcoming if item.get('symbol')]
@@ -1700,7 +1752,7 @@ def build_earnings_data():
             continue
         surprise_candidates.append(item)
     surprise_candidates.sort(key=lambda x: abs(float(x.get('epsEstimated') or 0)), reverse=True)
-    print('[EARNINGS] Positive surprises in S&P 500: ' + str(len(surprise_candidates)))
+    print('[EARNINGS] Positive surprises in universe: ' + str(len(surprise_candidates)))
 
     # For each surprise candidate: fetch OHLC candles + compute signal
     signals = []
