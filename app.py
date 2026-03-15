@@ -1880,6 +1880,13 @@ def build_earnings_data():
         if not pre_close or pre_close == 0:
             continue
 
+        # Playbook: earnings candle must be bullish (close > open = confirmation)
+        if c_close[e_idx] <= c_open[e_idx]:
+            if _sig_debug <= 5:
+                _sig_debug += 1
+                print('[EARNINGS] ' + sym + ': bearish earnings candle (close=' + str(round(c_close[e_idx], 2)) + ' <= open=' + str(round(c_open[e_idx], 2)) + '), skipping')
+            continue
+
         gap_pct = round((post_open - pre_close) / pre_close * 100, 2)
         drift_pct = round((current_price - post_open) / post_open * 100, 2) if post_open else 0
         days_since = (today - e_dt).days
@@ -1896,13 +1903,20 @@ def build_earnings_data():
         else:
             gap_type, setup_type = 'large', 'zone_entry'
 
-        entry = round(earnings_high, 2)
+        # Playbook: zone_entry (gap >8%) → entry at preClose (price returns to pre-gap zone)
+        if setup_type == 'zone_entry':
+            entry = round(pre_close, 2)
+        else:
+            entry = round(earnings_high, 2)
         stop = round(earnings_low, 2)
         if entry <= stop:
             continue
         risk = entry - stop
         target = round(entry + risk * 3, 2)
         rr = 3.0
+
+        # Sector hype flag (Playbook: "per le aziende in hype si può evitare la regola dell'S&P500")
+        sector_hype = (sector == 'Industrials' or sector_etf == 'XLE')
 
         gap_filled = current_price < post_open if gap_pct > 0 else current_price > post_open
 
@@ -1940,6 +1954,7 @@ def build_earnings_data():
             'sectorTrend': s_trend,
             'spxTrend': spx_trend,
             'trendValid': trend_valid,
+            'sectorHype': sector_hype,
             'surprisePct': surprise_pct,
             'gapPct': gap_pct,
             'gapType': gap_type,
