@@ -1775,6 +1775,7 @@ def build_earnings_data():
 
     # For each surprise candidate: use universe data (no FMP profile call) + OHLC candles
     signals = []
+    _sig_debug = 0
     for item in surprise_candidates:
         sym = item.get('symbol', '')
         earnings_date = item.get('date', '')
@@ -1801,6 +1802,8 @@ def build_earnings_data():
             import yfinance as yf
             hist = yf.Ticker(sym).history(start=candle_from, end=candle_to)
             if hist is None or hist.empty or len(hist) < 2:
+                if _sig_debug < 5:
+                    print('[EARNINGS] ' + sym + ': no candle data (len=' + str(0 if hist is None or hist.empty else len(hist)) + ')')
                 continue
         except Exception as e:
             print('[EARNINGS] yfinance candle ' + sym + ': ' + str(e))
@@ -1863,15 +1866,26 @@ def build_earnings_data():
 
         gap_filled = current_price < post_open if gap_pct > 0 else current_price > post_open
 
+        # Debug: log first 5 candidates before invalidation
+        _sig_debug += 1
+        if _sig_debug <= 5:
+            print('[EARNINGS] Signal check ' + sym + ': price=' + str(round(current_price, 2)) + ' eLow=' + str(round(earnings_low, 2)) + ' preClose=' + str(round(pre_close, 2)) + ' drift=' + str(drift_pct) + ' gap=' + str(gap_pct) + ' entry=' + str(round(earnings_high, 2)) + ' days=' + str(days_since))
+
         # --- Signal invalidation checks (from Playbook) ---
         # 1. Price broke below earnings candle low → setup dead
         if current_price < earnings_low:
+            if _sig_debug <= 5:
+                print('[EARNINGS]   -> REJECTED: price < earningsLow')
             continue
         # 2. Drift heavily negative (<-3%) → market rejected the surprise
         if drift_pct < -3:
+            if _sig_debug <= 5:
+                print('[EARNINGS]   -> REJECTED: drift < -3%')
             continue
         # 3. Price below pre-earnings close → entire move cancelled
         if current_price < pre_close:
+            if _sig_debug <= 5:
+                print('[EARNINGS]   -> REJECTED: price < preClose')
             continue
 
         is_active = days_since < 30 and not gap_filled
