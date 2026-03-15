@@ -1530,10 +1530,7 @@ import time as _time
 FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
 FINNHUB_BASE = 'https://finnhub.io/api/v1'
 
-FMP_API_KEY = os.environ.get('FMP_API_KEY', '')
-FMP_BASE = 'https://financialmodelingprep.com/stable'
 CACHE_TTL_7D = 3600 * 24 * 7
-_fmp_call_count = 0
 
 SECTOR_ETF_MAP = {
     'Technology': 'XLK', 'Financial Services': 'XLF', 'Energy': 'XLE',
@@ -1570,63 +1567,15 @@ def fetch_finnhub(endpoint):
         return _cache.get(ck, {})
 
 
-def fetch_fmp(endpoint):
-    """Fetch from FMP API with 6h caching. Rate limit ~80 calls/period."""
-    global _fmp_call_count
-    ck = 'fmp_' + endpoint.replace('/', '_').replace('?', '_').replace('&', '_')[:120]
-    now = datetime.datetime.now()
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
-        return _cache[ck]
-    _time.sleep(0.5)  # avoid triggering FMP rate limit
-    sep = '&' if '?' in endpoint else '?'
-    url = FMP_BASE + '/' + endpoint + sep + 'apikey=' + FMP_API_KEY
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        _fmp_call_count += 1
-        _cache[ck] = data
-        _cache_time[ck] = now
-        print('[FMP] OK ' + endpoint[:60] + ' (' + str(_fmp_call_count) + ' calls)')
-        return data
-    except Exception as e:
-        print('[FMP] ERR ' + endpoint[:60] + ': ' + str(e))
-        return _cache.get(ck, [])
-
-
 def get_stock_universe():
-    """Fetch NYSE/NASDAQ stocks with 2.5B-250B market cap (cached 7 days).
-    Uses FMP company-screener. Falls back to hardcoded S&P 500 list.
+    """Return hardcoded S&P 500 universe for signals pre-filtering.
     Returns dict {symbol: {name, sector, marketCap}}."""
-    ck = 'fmp_stock_universe'
+    ck = 'earnings_universe'
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_7D:
         return _cache[ck]
 
     profiles = {}
-
-    # Try FMP company-screener (1 call, returns up to 1000 stocks)
-    data = fetch_fmp('company-screener?exchange=NASDAQ,NYSE&marketCapMoreThan=10000000000&marketCapLowerThan=200000000000&limit=1000')
-    print('[EARNINGS] Screener response: type=' + type(data).__name__ + ' len=' + str(len(data) if isinstance(data, list) else 'N/A'))
-    if isinstance(data, list) and len(data) > 0:
-        print('[EARNINGS] Screener sample: ' + str(data[0])[:200])
-        for item in data:
-            sym = item.get('symbol', '')
-            if sym:
-                profiles[sym] = {
-                    'name': item.get('companyName', '') or item.get('name', sym),
-                    'sector': item.get('sector', ''),
-                    'marketCap': item.get('marketCap', 0),
-                }
-
-    if len(profiles) >= 100:
-        print('[EARNINGS] Universe from screener: ' + str(len(profiles)) + ' stocks')
-        _cache[ck] = profiles
-        _cache_time[ck] = now
-        return profiles
-
-    # Fallback: hardcoded S&P 500 tickers (as of March 2026)
-    print('[EARNINGS] Screener returned ' + str(len(profiles)) + ' stocks, using hardcoded S&P 500 fallback')
     _SP500 = {
         'AAPL','ABBV','ABT','ACN','ADBE','ADI','ADM','ADP','ADSK','AEE','AEP','AES','AFL','AIG','AIZ',
         'AJG','AKAM','ALB','ALGN','ALK','ALL','ALLE','AMAT','AMCR','AMD','AME','AMGN','AMP','AMT','AMZN',
@@ -1663,27 +1612,23 @@ def get_stock_universe():
         'WRB','WRK','WST','WTW','WY','WYNN','XEL','XOM','XRAY','XYL','YUM','ZBH','ZBRA','ZION','ZTS',
     }
     for sym in _SP500:
-        if sym not in profiles:
-            profiles[sym] = {'name': sym, 'sector': '', 'marketCap': 0}
-    print('[EARNINGS] Universe with fallback: ' + str(len(profiles)) + ' stocks')
+        profiles[sym] = {'name': sym, 'sector': '', 'marketCap': 0}
+    print('[EARNINGS] Hardcoded S&P 500 universe: ' + str(len(profiles)) + ' stocks')
     _cache[ck] = profiles
     _cache_time[ck] = now
     return profiles
 
 
 def build_earnings_data():
-    """Build PEAD earnings intelligence data using FMP."""
-    global _fmp_call_count
-    _fmp_call_count = 0
-
-    if not FMP_API_KEY or not FINNHUB_API_KEY:
-        print('[EARNINGS] Missing API keys: FMP=' + ('yes' if FMP_API_KEY else 'NO') + ' FINNHUB=' + ('yes' if FINNHUB_API_KEY else 'NO'))
+    """Build PEAD earnings intelligence data. Finviz (upcoming) + Finnhub (calendar) + yfinance (candles/quotes)."""
+    if not FINNHUB_API_KEY:
+        print('[EARNINGS] Missing FINNHUB_API_KEY')
         return {'upcoming': [], 'signals': [], 'marketTrend': {}}
 
     today = datetime.date.today()
     today_str = today.isoformat()
 
-    # --- Step 0: Stock universe for signals pre-filter (1 FMP call, cached 7 days) ---
+    # --- Step 0: Stock universe for signals pre-filter (hardcoded, cached 7 days) ---
     profiles = get_stock_universe()
     valid_syms = set(profiles.keys())
     print('[EARNINGS] Step 0: Universe = ' + str(len(valid_syms)) + ' stocks (used for signals only)')
@@ -1848,23 +1793,25 @@ def build_earnings_data():
         spx_trend = spx_trend_data.get('trend', 'bearish')
         trend_valid = (s_trend == 'bullish' or spx_trend == 'bullish')
 
-        # Fetch OHLC candles from FMP (full history with date range)
+        # Fetch OHLC candles from yfinance (no rate limit)
         e_dt = datetime.date.fromisoformat(earnings_date)
         candle_from = (e_dt - datetime.timedelta(days=5)).isoformat()
-        candle_to = today_str
-        candles = fetch_fmp('historical-price-eod/full?symbol=' + sym + '&from=' + candle_from + '&to=' + candle_to)
-        if not candles or not isinstance(candles, list) or len(candles) < 2:
+        candle_to = (today + datetime.timedelta(days=1)).isoformat()  # yfinance end is exclusive
+        try:
+            import yfinance as yf
+            hist = yf.Ticker(sym).history(start=candle_from, end=candle_to)
+            if hist is None or hist.empty or len(hist) < 2:
+                continue
+        except Exception as e:
+            print('[EARNINGS] yfinance candle ' + sym + ': ' + str(e))
             continue
 
-        # FMP returns newest-first, reverse to chronological
-        candles.sort(key=lambda x: x.get('date', ''))
-
-        # Build date-indexed arrays
-        c_dates = [c.get('date', '') for c in candles]
-        c_open = [c.get('open', 0) for c in candles]
-        c_high = [c.get('high', 0) for c in candles]
-        c_low = [c.get('low', 0) for c in candles]
-        c_close = [c.get('close', 0) for c in candles]
+        # Build date-indexed arrays from DataFrame
+        c_dates = [idx.strftime('%Y-%m-%d') for idx in hist.index]
+        c_open = [float(row['Open']) for _, row in hist.iterrows()]
+        c_high = [float(row['High']) for _, row in hist.iterrows()]
+        c_low = [float(row['Low']) for _, row in hist.iterrows()]
+        c_close = [float(row['Close']) for _, row in hist.iterrows()]
 
         # Find earnings day index
         e_idx = None
@@ -1961,22 +1908,40 @@ def build_earnings_data():
     signals.sort(key=lambda x: abs(x.get('surprisePct', 0)), reverse=True)
     print('[EARNINGS] Final signals: ' + str(len(signals)))
 
-    # --- Step 4: Batch quote for current prices of active signals ---
+    # --- Step 4: Batch quote for current prices via yfinance ---
     active_syms = [s['symbol'] for s in signals if s.get('isActive')]
     if active_syms:
-        batch = fetch_fmp('batch-quote-short?symbols=' + ','.join(active_syms))
-        if isinstance(batch, list):
-            price_map = {q['symbol']: q.get('price', 0) for q in batch if q.get('symbol')}
-            for sig in signals:
-                if sig['symbol'] in price_map and price_map[sig['symbol']]:
-                    sig['currentPrice'] = round(price_map[sig['symbol']], 2)
-                    cp = sig['currentPrice']
-                    # Recalculate drift with live price
-                    if sig['postOpen'] and sig['postOpen'] != 0:
-                        sig['driftPct'] = round((cp - sig['postOpen']) / sig['postOpen'] * 100, 2)
-                    sig['gapFilled'] = cp < sig['postOpen'] if sig['gapPct'] > 0 else cp > sig['postOpen']
-                    sig['isActive'] = sig['daysSinceEarnings'] < 30 and not sig['gapFilled']
-            print('[EARNINGS] Batch quote updated ' + str(len(price_map)) + ' signals')
+        try:
+            import yfinance as yf
+            tickers_str = ' '.join(active_syms)
+            data = yf.download(tickers_str, period='1d', progress=False)
+            if data is not None and not data.empty:
+                price_map = {}
+                if len(active_syms) == 1:
+                    # Single ticker: data.columns are just ['Open','High',...]
+                    if 'Close' in data.columns and len(data) > 0:
+                        price_map[active_syms[0]] = float(data['Close'].iloc[-1])
+                else:
+                    # Multiple tickers: MultiIndex columns (field, ticker)
+                    if 'Close' in data.columns.get_level_values(0):
+                        for sym in active_syms:
+                            try:
+                                val = data['Close'][sym].iloc[-1]
+                                if val and not (isinstance(val, float) and val != val):  # not NaN
+                                    price_map[sym] = float(val)
+                            except:
+                                pass
+                for sig in signals:
+                    if sig['symbol'] in price_map and price_map[sig['symbol']]:
+                        sig['currentPrice'] = round(price_map[sig['symbol']], 2)
+                        cp = sig['currentPrice']
+                        if sig['postOpen'] and sig['postOpen'] != 0:
+                            sig['driftPct'] = round((cp - sig['postOpen']) / sig['postOpen'] * 100, 2)
+                        sig['gapFilled'] = cp < sig['postOpen'] if sig['gapPct'] > 0 else cp > sig['postOpen']
+                        sig['isActive'] = sig['daysSinceEarnings'] < 30 and not sig['gapFilled']
+                print('[EARNINGS] yfinance batch quote updated ' + str(len(price_map)) + ' signals')
+        except Exception as e:
+            print('[EARNINGS] yfinance batch quote error: ' + str(e))
 
     # Remove signals invalidated by live prices
     before_count = len(signals)
@@ -1985,9 +1950,7 @@ def build_earnings_data():
                and s['driftPct'] >= -3
                and s['currentPrice'] >= s['preClose']]
     if len(signals) < before_count:
-        print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated signals after live price update')
-
-    print('[FMP] Total API calls this build: ' + str(_fmp_call_count))
+        print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated after live price update')
 
     return {
         'upcoming': upcoming,
@@ -2015,7 +1978,7 @@ def api_earnings():
 
 @app.route('/api/earnings/refresh')
 def api_earnings_refresh():
-    keys = [k for k in _cache if k.startswith('earnings_') or k.startswith('fmp_') or k.startswith('fh_')]
+    keys = [k for k in _cache if k.startswith('earnings_') or k.startswith('fh_')]
     for k in keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
