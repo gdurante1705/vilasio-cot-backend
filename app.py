@@ -1685,38 +1685,43 @@ def build_earnings_data():
     if raw_upcoming:
         print('[EARNINGS] Sample upcoming item: ' + str(raw_upcoming[0]))
 
-    # Fast filter: only S&P 500 stocks
-    filtered_upcoming = [item for item in raw_upcoming if item.get('symbol', '') in valid_syms]
-    filtered_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimated') or 0)), reverse=True)
-    print('[EARNINGS] Upcoming in universe: ' + str(len(filtered_upcoming)))
+    # No universe filter for upcoming — sort by EPS estimate desc, cap at 50 profile calls
+    raw_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimated') or 0)), reverse=True)
 
-    # Fetch individual profiles for filtered upcoming (sector, marketCap, name)
+    # Fetch individual profiles to filter by exchange + market cap (no universe restriction)
     upcoming = []
-    for item in filtered_upcoming:
+    profiled = 0
+    for item in raw_upcoming:
+        if profiled >= 50:
+            break
         sym = item.get('symbol', '')
         if not sym:
             continue
-        # Fetch FMP profile (cached 24h via CACHE_TTL)
         prof_data = fetch_fmp('profile?symbol=' + sym)
+        profiled += 1
         if isinstance(prof_data, list) and prof_data:
             prof_detail = prof_data[0]
         elif isinstance(prof_data, dict) and prof_data.get('symbol'):
             prof_detail = prof_data
         else:
-            # Fall back to screener/hardcoded data
-            prof_detail = profiles.get(sym, {})
-        mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
-        if mcap and (mcap < 2.5e9 or mcap > 250e9):
             continue
-        name = prof_detail.get('companyName', '') or prof_detail.get('name', '') or profiles.get(sym, {}).get('name', sym)
-        sector = prof_detail.get('sector', '') or profiles.get(sym, {}).get('sector', '')
+        # Filter: NYSE/NASDAQ only
+        exchange = (prof_detail.get('exchangeShortName', '') or prof_detail.get('exchange', '')).upper()
+        if exchange not in ('NYSE', 'NASDAQ'):
+            continue
+        # Filter: market cap 2.5B-250B
+        mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
+        if not mcap or mcap < 2.5e9 or mcap > 250e9:
+            continue
+        name = prof_detail.get('companyName', '') or prof_detail.get('name', sym)
+        sector = prof_detail.get('sector', '')
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
         sector_trend_info = market_trend.get(sector_etf, {})
         upcoming.append({
             'symbol': sym,
             'name': name,
             'date': item.get('date', ''),
-            'marketCap': round(mcap) if mcap else None,
+            'marketCap': round(mcap),
             'sector': sector,
             'sectorEtf': sector_etf,
             'sectorTrend': sector_trend_info.get('trend', ''),
@@ -1725,6 +1730,7 @@ def build_earnings_data():
             'quarter': item.get('quarter'),
             'year': item.get('year'),
         })
+    print('[EARNINGS] Profiled ' + str(profiled) + ' upcoming, passed filters: ' + str(len(upcoming)))
     upcoming.sort(key=lambda x: x.get('date', ''))
     print('[EARNINGS] Final upcoming: ' + str(len(upcoming)))
 
