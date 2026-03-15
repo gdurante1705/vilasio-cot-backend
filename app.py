@@ -1663,6 +1663,8 @@ def build_earnings_data():
     cal_data = fetch_finnhub('calendar/earnings?from=' + from_date + '&to=' + to_date)
     raw_upcoming = cal_data.get('earningsCalendar', []) if isinstance(cal_data, dict) else []
     print('[EARNINGS] Raw upcoming: ' + str(len(raw_upcoming)))
+    if raw_upcoming:
+        print('[EARNINGS] Sample upcoming item: ' + str(raw_upcoming[0]))
 
     # Fast filter: only process stocks in our valid universe
     filtered_upcoming = [item for item in raw_upcoming if item.get('symbol', '') in valid_syms]
@@ -1682,14 +1684,24 @@ def build_earnings_data():
         mcap_usd = mcap * 1e6
         if mcap_usd < 2.5e9 or mcap_usd > 250e9:
             continue
+        sector = profile.get('finnhubIndustry', '')
+        sector_etf = SECTOR_ETF_MAP.get(sector, '')
+        sector_trend_info = market_trend.get(sector_etf, {})
+        # Finnhub calendar: epsActual is null for upcoming (not yet reported).
+        # revenueEstimate available. No previous-quarter EPS in this endpoint.
+        # Use year field + quarter to note context instead.
         upcoming.append({
             'symbol': sym,
             'name': profile.get('name', sym),
             'date': item.get('date', ''),
             'marketCap': round(mcap_usd),
-            'sector': profile.get('finnhubIndustry', ''),
+            'sector': sector,
+            'sectorEtf': sector_etf,
+            'sectorTrend': sector_trend_info.get('trend', ''),
             'epsEstimate': item.get('epsEstimate'),
-            'previousEps': item.get('epsActual'),
+            'revenueEstimate': item.get('revenueEstimate'),
+            'quarter': item.get('quarter'),
+            'year': item.get('year'),
             'previousSurprise': round(float(item.get('surprisePercent', 0) or 0), 2)
         })
     upcoming.sort(key=lambda x: x.get('date', ''))
@@ -1698,9 +1710,13 @@ def build_earnings_data():
     # --- Step 3: Recent earnings with surprise (last 21 days) ---
     print('[EARNINGS] Step 3: Recent earnings...')
     recent_from = (today - datetime.timedelta(days=21)).isoformat()
-    recent_cal = fetch_finnhub('calendar/earnings?from=' + recent_from + '&to=' + today_str)
+    recent_endpoint = 'calendar/earnings?from=' + recent_from + '&to=' + today_str
+    print('[EARNINGS] Recent from=' + recent_from + ' to=' + today_str + ' endpoint=' + recent_endpoint)
+    recent_cal = fetch_finnhub(recent_endpoint)
     raw_recent = recent_cal.get('earningsCalendar', []) if isinstance(recent_cal, dict) else []
-    print('[EARNINGS] Raw recent: ' + str(len(raw_recent)))
+    print('[EARNINGS] Raw recent: ' + str(len(raw_recent)) + ' (response keys: ' + str(list(recent_cal.keys()) if isinstance(recent_cal, dict) else type(recent_cal).__name__) + ')')
+    if raw_recent:
+        print('[EARNINGS] Sample recent item: ' + str(raw_recent[0]))
 
     # Fast filter: universe + positive surprise (no profile call needed)
     surprise_candidates = []
