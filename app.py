@@ -1782,11 +1782,51 @@ def build_earnings_data():
         if not sym or not earnings_date:
             continue
 
-        # Use cached universe data — all candidates are already in valid_syms (S&P 500)
-        # Skip individual profile calls to save FMP budget for candles
-        prof = profiles.get(sym, {})
-        name = prof.get('name', sym)
-        sector = prof.get('sector', '')
+        # Fetch fundamentals from Finviz (scraping, no API key, cached 24h)
+        ck_fvz = 'fvz_quote_' + sym
+        now_fvz = datetime.datetime.now()
+        fvz_data = None
+        if ck_fvz in _cache and (now_fvz - _cache_time.get(ck_fvz, now_fvz)).total_seconds() < 86400:
+            fvz_data = _cache[ck_fvz]
+        else:
+            try:
+                from finvizfinance.quote import finvizfinance as fvz
+                stock = fvz(sym)
+                fund = stock.ticker_fundament()
+                fvz_data = fund if isinstance(fund, dict) else {}
+                _cache[ck_fvz] = fvz_data
+                _cache_time[ck_fvz] = now_fvz
+            except Exception as e:
+                print('[EARNINGS] Finviz quote ' + sym + ': ' + str(e))
+                fvz_data = {}
+                _cache[ck_fvz] = fvz_data
+                _cache_time[ck_fvz] = now_fvz
+
+        name = fvz_data.get('Company', '') or profiles.get(sym, {}).get('name', sym)
+        sector = fvz_data.get('Sector', '') or profiles.get(sym, {}).get('sector', '')
+
+        # Parse market cap from Finviz (e.g. "53.1B", "12.3B", "850.5M")
+        mcap_str = fvz_data.get('Market Cap', '')
+        mcap = 0
+        if isinstance(mcap_str, str) and mcap_str:
+            mcap_str = mcap_str.replace(',', '')
+            try:
+                if mcap_str.endswith('B'):
+                    mcap = float(mcap_str[:-1]) * 1e9
+                elif mcap_str.endswith('M'):
+                    mcap = float(mcap_str[:-1]) * 1e6
+                elif mcap_str.endswith('T'):
+                    mcap = float(mcap_str[:-1]) * 1e12
+                else:
+                    mcap = float(mcap_str)
+            except:
+                mcap = 0
+        # Filter market cap 10B-200B
+        if mcap and (mcap < 10e9 or mcap > 200e9):
+            if _sig_debug <= 5:
+                print('[EARNINGS] ' + sym + ': mcap ' + str(mcap_str) + ' outside 10B-200B, skipping')
+            continue
+
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
         sector_trend_data = market_trend.get(sector_etf, {})
         spx_trend_data = market_trend.get('SPX', {})
@@ -1894,7 +1934,7 @@ def build_earnings_data():
             'symbol': sym,
             'name': name,
             'earningsDate': earnings_date,
-            'marketCap': prof.get('marketCap') or None,
+            'marketCap': round(mcap) if mcap else None,
             'sector': sector,
             'sectorEtf': sector_etf,
             'sectorTrend': s_trend,
@@ -1992,7 +2032,7 @@ def api_earnings():
 
 @app.route('/api/earnings/refresh')
 def api_earnings_refresh():
-    keys = [k for k in _cache if k.startswith('earnings_') or k.startswith('fh_')]
+    keys = [k for k in _cache if k.startswith('earnings_') or k.startswith('fh_') or k.startswith('fvz_')]
     for k in keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
