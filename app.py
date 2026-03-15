@@ -1685,10 +1685,22 @@ def build_earnings_data():
     if raw_upcoming:
         print('[EARNINGS] Sample upcoming item: ' + str(raw_upcoming[0]))
 
-    # No universe filter for upcoming — sort by EPS estimate desc, cap at 50 profile calls
-    raw_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimated') or 0)), reverse=True)
+    # Pre-filter: exclude known mega caps (>250B) to avoid wasting profile calls
+    _MEGA_CAPS = {
+        'AAPL','MSFT','GOOGL','GOOG','AMZN','META','NVDA','TSLA','BRK-B','BRK-A',
+        'JPM','V','MA','UNH','JNJ','XOM','PG','HD','LLY','AVGO','ORCL','COST',
+        'WMT','NFLX','ABBV','CRM','MRK','PEP','KO','TMO','MCD','CSCO','ACN',
+        'LIN','ABT','DHR','TXN','QCOM','ISRG','INTU','AMGN','BKNG','ANET',
+        'CMCSA','PFE','NOW','IBM','GE','CAT','RTX','UNP','HON','LOW','SPGI',
+        'DE','BA','MMM','GS','MS','BLK','AXP','SCHW','C','USB','PNC',
+    }
+    raw_upcoming = [item for item in raw_upcoming if item.get('symbol', '') not in _MEGA_CAPS]
+    print('[EARNINGS] After mega-cap exclusion: ' + str(len(raw_upcoming)))
 
-    # Fetch individual profiles to filter by exchange + market cap (no universe restriction)
+    # Sort by date (chronological) so we get a good spread of upcoming stocks
+    raw_upcoming.sort(key=lambda x: x.get('date', ''))
+
+    # Fetch individual profiles to filter by exchange + market cap
     upcoming = []
     profiled = 0
     for item in raw_upcoming:
