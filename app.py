@@ -1571,12 +1571,13 @@ def fetch_finnhub(endpoint):
 
 
 def fetch_fmp(endpoint):
-    """Fetch from FMP API with 6h caching. No sleep needed (250 calls/day, not per minute)."""
+    """Fetch from FMP API with 6h caching. Rate limit ~80 calls/period."""
     global _fmp_call_count
     ck = 'fmp_' + endpoint.replace('/', '_').replace('?', '_').replace('&', '_')[:120]
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
+    _time.sleep(0.5)  # avoid triggering FMP rate limit
     sep = '&' if '?' in endpoint else '?'
     url = FMP_BASE + '/' + endpoint + sep + 'apikey=' + FMP_API_KEY
     try:
@@ -1738,11 +1739,11 @@ def build_earnings_data():
     first50 = [item.get('symbol', '?') for item in raw_upcoming[:50]]
     print('[EARNINGS] First 50 (S&P500 first): ' + str(first50))
 
-    # Fetch FMP profiles for top 100 (exchange + mcap filter)
+    # Fetch FMP profiles for top 40 (S&P 500 first, so 40 is enough)
     upcoming = []
     profiled = 0
     for item in raw_upcoming:
-        if profiled >= 100:
+        if profiled >= 40:
             break
         sym = item.get('symbol', '')
         prof_data = fetch_fmp('profile?symbol=' + sym)
@@ -1811,7 +1812,7 @@ def build_earnings_data():
     surprise_candidates.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
     print('[EARNINGS] Positive surprises in universe: ' + str(len(surprise_candidates)))
 
-    # For each surprise candidate: fetch profile + OHLC candles + compute signal
+    # For each surprise candidate: use universe data (no FMP profile call) + OHLC candles
     signals = []
     for item in surprise_candidates:
         sym = item.get('symbol', '')
@@ -1819,19 +1820,11 @@ def build_earnings_data():
         if not sym or not earnings_date:
             continue
 
-        # Fetch FMP profile for accurate sector + market cap
-        prof_data = fetch_fmp('profile?symbol=' + sym)
-        if isinstance(prof_data, list) and prof_data:
-            prof_detail = prof_data[0]
-        elif isinstance(prof_data, dict) and prof_data.get('symbol'):
-            prof_detail = prof_data
-        else:
-            prof_detail = profiles.get(sym, {})
-        mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
-        if mcap and (mcap < 10e9 or mcap > 200e9):
-            continue
-        name = prof_detail.get('companyName', '') or prof_detail.get('name', '') or profiles.get(sym, {}).get('name', sym)
-        sector = prof_detail.get('sector', '') or profiles.get(sym, {}).get('sector', '')
+        # Use cached universe data — all candidates are already in valid_syms (S&P 500)
+        # Skip individual profile calls to save FMP budget for candles
+        prof = profiles.get(sym, {})
+        name = prof.get('name', sym)
+        sector = prof.get('sector', '')
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
         sector_trend_data = market_trend.get(sector_etf, {})
         spx_trend_data = market_trend.get('SPX', {})
@@ -1924,7 +1917,7 @@ def build_earnings_data():
             'symbol': sym,
             'name': name,
             'earningsDate': earnings_date,
-            'marketCap': round(mcap) if mcap else None,
+            'marketCap': prof.get('marketCap') or None,
             'sector': sector,
             'sectorEtf': sector_etf,
             'sectorTrend': s_trend,
