@@ -1529,6 +1529,7 @@ import time as _time
 
 FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
 FINNHUB_BASE = 'https://finnhub.io/api/v1'
+CACHE_TTL_24H = 3600 * 24
 
 SECTOR_ETF_MAP = {
     'Technology': 'XLK', 'Financial Services': 'XLF', 'Energy': 'XLE',
@@ -1541,7 +1542,8 @@ def fetch_finnhub(endpoint):
     """Fetch from Finnhub API with caching and rate limiting."""
     ck = 'fh_' + endpoint.replace('/', '_').replace('?', '_').replace('&', '_')[:80]
     now = datetime.datetime.now()
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+    ttl = CACHE_TTL_24H if 'profile2' in endpoint else CACHE_TTL
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < ttl:
         return _cache[ck]
     url = FINNHUB_BASE + '/' + endpoint + ('&' if '?' in endpoint else '?') + 'token=' + FINNHUB_API_KEY
     _time.sleep(1.1)  # rate limit: 60 calls/min
@@ -1592,12 +1594,14 @@ def build_earnings_data():
     to_date = (today + datetime.timedelta(days=14)).isoformat()
     cal_data = fetch_finnhub('calendar/earnings?from=' + from_date + '&to=' + to_date)
     raw_upcoming = cal_data.get('earningsCalendar', []) if isinstance(cal_data, dict) else []
+    # Sort by epsEstimate descending — higher EPS estimates tend to be larger, more liquid stocks
+    raw_upcoming.sort(key=lambda x: float(x.get('epsEstimate') or 0), reverse=True)
     print('[EARNINGS] Raw upcoming: ' + str(len(raw_upcoming)))
 
     upcoming = []
     processed = 0
     for item in raw_upcoming:
-        if processed >= 40:
+        if processed >= 80:
             break
         sym = item.get('symbol', '')
         if not sym:
@@ -1649,12 +1653,14 @@ def build_earnings_data():
         if actual_f <= estimate_f:
             continue
         surprise_candidates.append(item)
+    # Sort by epsEstimate descending so we profile the most important stocks first
+    surprise_candidates.sort(key=lambda x: float(x.get('epsEstimate') or 0), reverse=True)
     print('[EARNINGS] Positive surprises: ' + str(len(surprise_candidates)))
 
     signals = []
     processed = 0
     for item in surprise_candidates:
-        if processed >= 35:
+        if processed >= 60:
             break
         sym = item.get('symbol', '')
         earnings_date = item.get('date', '')
@@ -1680,9 +1686,8 @@ def build_earnings_data():
         s_trend = sector_trend_data.get('trend', 'bearish')
         spx_trend = spx_trend_data.get('trend', 'bearish')
 
-        # Skip if both sector and SPX bearish
-        if s_trend == 'bearish' and spx_trend == 'bearish':
-            continue
+        # Trend valid if at least one of sector/SPX is bullish (from Playbook)
+        trend_valid = (s_trend == 'bullish' or spx_trend == 'bullish')
 
         # Fetch candles
         e_dt = datetime.date.fromisoformat(earnings_date)
@@ -1765,6 +1770,7 @@ def build_earnings_data():
             'sectorEtf': sector_etf,
             'sectorTrend': s_trend,
             'spxTrend': spx_trend,
+            'trendValid': trend_valid,
             'surprisePct': surprise_pct,
             'gapPct': gap_pct,
             'gapType': gap_type,
