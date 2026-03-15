@@ -2074,6 +2074,217 @@ def api_earnings_refresh():
     print('[EARNINGS] Cache cleared (' + str(len(keys)) + ' keys)')
     return api_earnings()
 
+
+# ─── CONGRESSIONAL POSITIONING ────────────────────────────────────────────────
+
+def build_congressional_data():
+    """Build congressional + insider trading intelligence."""
+    today = datetime.date.today()
+    today_str = today.isoformat()
+    from_30 = (today - datetime.timedelta(days=30)).isoformat()
+
+    # --- Congressional trades from Finnhub ---
+    print('[CONGRESS] Fetching congressional trades...')
+    congress_trades = []
+    fh_data = fetch_finnhub('stock/congressional-trading?from=' + from_30 + '&to=' + today_str)
+    if isinstance(fh_data, dict) and fh_data.get('data'):
+        for item in fh_data['data']:
+            congress_trades.append({
+                'date': item.get('transactionDate', ''),
+                'name': item.get('name', ''),
+                'party': item.get('party', ''),
+                'chamber': item.get('chamber', ''),
+                'symbol': item.get('symbol', ''),
+                'transaction': item.get('transactionType', ''),
+                'amount': item.get('amountFrom', ''),
+                'amountTo': item.get('amountTo', ''),
+                'asset': item.get('assetName', ''),
+            })
+    elif isinstance(fh_data, list):
+        for item in fh_data:
+            congress_trades.append({
+                'date': item.get('transactionDate', item.get('date', '')),
+                'name': item.get('name', item.get('representative', '')),
+                'party': item.get('party', ''),
+                'chamber': item.get('chamber', item.get('house', '')),
+                'symbol': item.get('symbol', item.get('ticker', '')),
+                'transaction': item.get('transactionType', item.get('transaction', '')),
+                'amount': item.get('amountFrom', item.get('amount', '')),
+                'amountTo': item.get('amountTo', ''),
+                'asset': item.get('assetName', item.get('asset', '')),
+            })
+    congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
+    print('[CONGRESS] Congressional trades: ' + str(len(congress_trades)))
+
+    # --- Insider trades from Finviz ---
+    print('[CONGRESS] Fetching insider trades (Finviz)...')
+    insider_latest = []
+    insider_top_week = []
+
+    # Latest insider
+    ck_il = 'congress_insider_latest'
+    now = datetime.datetime.now()
+    if ck_il in _cache and (now - _cache_time.get(ck_il, now)).total_seconds() < CACHE_TTL:
+        insider_latest = _cache[ck_il]
+    else:
+        try:
+            from finvizfinance.insider import Insider
+            ins = Insider(option='latest')
+            df = ins.get_insider()
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    insider_latest.append({
+                        'date': str(row.get('Date', '')),
+                        'ticker': str(row.get('Ticker', '')),
+                        'owner': str(row.get('Owner', '')),
+                        'relationship': str(row.get('Relationship', '')),
+                        'transaction': str(row.get('Transaction', '')),
+                        'cost': str(row.get('Cost', '')),
+                        'shares': str(row.get('#Shares', '')),
+                        'value': str(row.get('Value ($)', row.get('Value', ''))),
+                        'sharesTotal': str(row.get('#Shares Total', '')),
+                    })
+            print('[CONGRESS] Insider latest: ' + str(len(insider_latest)))
+        except Exception as e:
+            print('[CONGRESS] Insider latest error: ' + str(e))
+        _cache[ck_il] = insider_latest
+        _cache_time[ck_il] = now
+
+    # Top week insider
+    ck_tw = 'congress_insider_topweek'
+    if ck_tw in _cache and (now - _cache_time.get(ck_tw, now)).total_seconds() < CACHE_TTL:
+        insider_top_week = _cache[ck_tw]
+    else:
+        try:
+            from finvizfinance.insider import Insider
+            ins2 = Insider(option='top week')
+            df2 = ins2.get_insider()
+            if df2 is not None and not df2.empty:
+                for _, row in df2.iterrows():
+                    txn = str(row.get('Transaction', ''))
+                    # Only buys for top week
+                    if 'Buy' not in txn and 'Purchase' not in txn:
+                        continue
+                    insider_top_week.append({
+                        'date': str(row.get('Date', '')),
+                        'ticker': str(row.get('Ticker', '')),
+                        'owner': str(row.get('Owner', '')),
+                        'relationship': str(row.get('Relationship', '')),
+                        'transaction': txn,
+                        'cost': str(row.get('Cost', '')),
+                        'shares': str(row.get('#Shares', '')),
+                        'value': str(row.get('Value ($)', row.get('Value', ''))),
+                        'sharesTotal': str(row.get('#Shares Total', '')),
+                    })
+            print('[CONGRESS] Insider top week (buys): ' + str(len(insider_top_week)))
+        except Exception as e:
+            print('[CONGRESS] Insider top week error: ' + str(e))
+        _cache[ck_tw] = insider_top_week
+        _cache_time[ck_tw] = now
+
+    # --- Stats ---
+    c_buys = len([t for t in congress_trades if 'Purchase' in t.get('transaction', '') or 'Buy' in t.get('transaction', '')])
+    c_sells = len([t for t in congress_trades if 'Sale' in t.get('transaction', '')])
+    net = 'bullish' if c_buys > c_sells else ('bearish' if c_sells > c_buys else 'neutral')
+
+    # Top sector from congressional buys
+    sector_count = {}
+    for t in congress_trades:
+        if 'Purchase' in t.get('transaction', '') or 'Buy' in t.get('transaction', ''):
+            sym = t.get('symbol', '')
+            if sym:
+                sector_count[sym] = sector_count.get(sym, 0) + 1
+    top_sector_sym = max(sector_count, key=sector_count.get) if sector_count else ''
+
+    # Biggest insider buy
+    biggest = {'ticker': '', 'value': '', 'owner': ''}
+    max_val = 0
+    for ins in insider_top_week + insider_latest:
+        txn = ins.get('transaction', '')
+        if 'Buy' not in txn and 'Purchase' not in txn:
+            continue
+        val_str = ins.get('value', '').replace(',', '').replace('$', '')
+        try:
+            val = float(val_str)
+            if val > max_val:
+                max_val = val
+                biggest = {'ticker': ins.get('ticker', ''), 'value': ins.get('value', ''), 'owner': ins.get('owner', '')}
+        except:
+            pass
+
+    # Smart Money Overlap: check if any insider buy tickers are in PEAD signals
+    # Try to get cached earnings data
+    overlap = []
+    earnings_ck = 'earnings_main'
+    if earnings_ck in _cache:
+        pead_syms = {s['symbol'] for s in _cache[earnings_ck].get('signals', [])}
+        insider_buy_syms = set()
+        for ins in insider_top_week + insider_latest:
+            txn = ins.get('transaction', '')
+            if 'Buy' in txn or 'Purchase' in txn:
+                insider_buy_syms.add(ins.get('ticker', ''))
+        for ins in congress_trades:
+            txn = ins.get('transaction', '')
+            if 'Purchase' in txn or 'Buy' in txn:
+                insider_buy_syms.add(ins.get('symbol', ''))
+        common = pead_syms & insider_buy_syms
+        for sym in common:
+            overlap.append({'symbol': sym, 'sources': []})
+            # Check which sources
+            if any(ins.get('ticker') == sym for ins in insider_latest + insider_top_week if 'Buy' in ins.get('transaction', '') or 'Purchase' in ins.get('transaction', '')):
+                overlap[-1]['sources'].append('insider')
+            if any(t.get('symbol') == sym for t in congress_trades if 'Purchase' in t.get('transaction', '') or 'Buy' in t.get('transaction', '')):
+                overlap[-1]['sources'].append('congress')
+            if sym in pead_syms:
+                overlap[-1]['sources'].append('pead')
+        print('[CONGRESS] Smart Money Overlap: ' + str(len(overlap)))
+
+    stats = {
+        'congressBuys': c_buys,
+        'congressSells': c_sells,
+        'netSentiment': net,
+        'topBuySymbol': top_sector_sym,
+        'biggestInsiderBuy': biggest,
+        'totalTrades': len(congress_trades),
+    }
+
+    return {
+        'congressTrades': congress_trades[:100],
+        'insiderLatest': insider_latest[:50],
+        'insiderTopWeek': insider_top_week[:50],
+        'smartMoneyOverlap': overlap,
+        'stats': stats,
+    }
+
+
+@app.route('/api/congressional')
+def api_congressional():
+    try:
+        ck = 'congressional_main'
+        now = datetime.datetime.now()
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 10800:  # 3h cache
+            return jsonify(_cache[ck])
+        data = build_congressional_data()
+        result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
+        result.update(data)
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return jsonify(result)
+    except Exception as e:
+        print('[CONGRESS] ' + str(e))
+        import traceback; traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/congressional/refresh')
+def api_congressional_refresh():
+    keys = [k for k in _cache if k.startswith('congressional_') or k.startswith('congress_')]
+    for k in keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[CONGRESS] Cache cleared (' + str(len(keys)) + ' keys)')
+    return api_congressional()
+
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
 
 def fetch_yf_weekly(symbol, years=2):
