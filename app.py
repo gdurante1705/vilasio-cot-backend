@@ -1718,19 +1718,25 @@ def build_earnings_data():
     if raw_upcoming:
         print('[EARNINGS] Sample: ' + str(raw_upcoming[0])[:200])
 
-    # Pre-filter: exclude mega caps, symbols with dots (foreign), empty symbols
+    # Pre-filter: exclude mega caps, dots (foreign), empty symbols
     raw_upcoming = [item for item in raw_upcoming
                     if item.get('symbol')
                     and '.' not in item['symbol']
                     and item['symbol'] not in _MEGA_CAPS]
     print('[EARNINGS] After pre-filter (no mega, no dots): ' + str(len(raw_upcoming)))
 
-    # Sort by EPS estimate desc (abs) — large caps with highest EPS first
-    raw_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
+    # Priority sort: S&P 500 universe first, then the rest
+    # Within each group, sort by abs(epsEstimate) desc
+    sp500_upcoming = [item for item in raw_upcoming if item.get('symbol', '') in valid_syms]
+    other_upcoming = [item for item in raw_upcoming if item.get('symbol', '') not in valid_syms]
+    sp500_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
+    other_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
+    raw_upcoming = sp500_upcoming + other_upcoming
+    print('[EARNINGS] S&P 500 in calendar: ' + str(len(sp500_upcoming)) + ', other: ' + str(len(other_upcoming)))
 
-    # Log first 50 symbols after pre-filter to verify coverage
+    # Log first 50 symbols to verify coverage
     first50 = [item.get('symbol', '?') for item in raw_upcoming[:50]]
-    print('[EARNINGS] First 50 after pre-filter: ' + str(first50))
+    print('[EARNINGS] First 50 (S&P500 first): ' + str(first50))
 
     # Fetch FMP profiles for top 100 (exchange + mcap filter)
     upcoming = []
