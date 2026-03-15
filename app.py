@@ -2084,69 +2084,44 @@ def build_congressional_data():
     from_30 = (today - datetime.timedelta(days=30)).isoformat()
     now = datetime.datetime.now()
 
-    # --- Congressional trades from Capitol Trades (scraping) ---
-    print('[CONGRESS] Fetching congressional trades...')
-    ck_ct = 'congress_capitol_trades'
+    # --- Congressional trades from FMP senate-latest + house-latest ---
+    print('[CONGRESS] Fetching congressional trades (FMP)...')
+    FMP_API_KEY = os.environ.get('FMP_API_KEY', '')
+    ck_ct = 'congress_fmp_trades'
     congress_trades = []
     if ck_ct in _cache and (now - _cache_time.get(ck_ct, now)).total_seconds() < CACHE_TTL:
         congress_trades = _cache[ck_ct]
-        print('[CONGRESS] Capitol Trades from cache: ' + str(len(congress_trades)))
+        print('[CONGRESS] FMP trades from cache: ' + str(len(congress_trades)))
     else:
-        try:
-            ct_url = 'https://www.capitoltrades.com/trades'
-            ct_req = urllib.request.Request(ct_url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml',
-            })
-            with urllib.request.urlopen(ct_req, timeout=20) as resp:
-                ct_html = resp.read().decode('utf-8')
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(ct_html, 'html.parser')
-            # Capitol Trades uses a table or data rows
-            rows = soup.select('table tbody tr') or soup.select('.trade-row') or soup.select('[data-trade]')
-            if not rows:
-                # Try finding any table rows
-                rows = soup.find_all('tr')
-            for row in rows[:100]:
-                cells = row.find_all('td')
-                if len(cells) < 5:
-                    continue
-                texts = [c.get_text(strip=True) for c in cells]
-                # Capitol Trades typical columns: Politician, Traded, Filed, Owner, Type, Size, Price
-                trade = {
-                    'date': texts[2] if len(texts) > 2 else '',
-                    'name': texts[0] if len(texts) > 0 else '',
-                    'party': '',
-                    'chamber': '',
-                    'symbol': '',
-                    'transaction': texts[4] if len(texts) > 4 else '',
-                    'amount': texts[5] if len(texts) > 5 else '',
-                    'amountTo': '',
-                    'asset': texts[1] if len(texts) > 1 else '',
-                }
-                # Try to extract party from class or text
-                party_el = cells[0].find(class_='party') or cells[0].find('span')
-                if party_el:
-                    pt = party_el.get_text(strip=True).upper()
-                    if 'R' in pt:
-                        trade['party'] = 'R'
-                    elif 'D' in pt:
-                        trade['party'] = 'D'
-                # Try to extract ticker from link
-                ticker_el = row.find('a', href=lambda h: h and '/stocks/' in h) if row else None
-                if ticker_el:
-                    trade['symbol'] = ticker_el.get_text(strip=True).upper()
-                elif len(texts) > 1:
-                    # Fallback: look for uppercase ticker pattern in asset
-                    import re
-                    m = re.search(r'\b([A-Z]{1,5})\b', texts[1])
-                    if m:
-                        trade['symbol'] = m.group(1)
-                congress_trades.append(trade)
-            print('[CONGRESS] Capitol Trades scraped: ' + str(len(congress_trades)))
-        except Exception as e:
-            print('[CONGRESS] Capitol Trades error: ' + str(e))
-            import traceback; traceback.print_exc()
+        if FMP_API_KEY:
+            fmp_base = 'https://financialmodelingprep.com/stable'
+            for chamber, endpoint in [('Senate', 'senate-latest'), ('House', 'house-latest')]:
+                try:
+                    url = fmp_base + '/' + endpoint + '?page=0&limit=100&apikey=' + FMP_API_KEY
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+                    _time.sleep(0.5)
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+                    if isinstance(data, list):
+                        for item in data:
+                            congress_trades.append({
+                                'date': item.get('transactionDate', item.get('disclosureDate', '')),
+                                'name': item.get('representative', item.get('firstName', '') + ' ' + item.get('lastName', '')).strip(),
+                                'party': item.get('party', ''),
+                                'chamber': chamber,
+                                'symbol': item.get('ticker', item.get('symbol', '')),
+                                'transaction': item.get('type', item.get('transactionType', '')),
+                                'amount': item.get('amount', ''),
+                                'amountTo': '',
+                                'asset': item.get('assetDescription', item.get('asset', '')),
+                            })
+                        print('[CONGRESS] FMP ' + chamber + ': ' + str(len(data)) + ' trades')
+                    else:
+                        print('[CONGRESS] FMP ' + chamber + ': unexpected response type=' + type(data).__name__)
+                except Exception as e:
+                    print('[CONGRESS] FMP ' + chamber + ' error: ' + str(e))
+        else:
+            print('[CONGRESS] No FMP_API_KEY, skipping congressional trades')
         congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
         _cache[ck_ct] = congress_trades
         _cache_time[ck_ct] = now
