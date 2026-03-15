@@ -1542,14 +1542,10 @@ SECTOR_ETF_MAP = {
     'Basic Materials': 'XLB', 'Utilities': 'XLU',
 }
 
-# Known mega caps (>250B) — excluded from profiling to save API calls
+# Known mega caps (>$500B) — excluded from profiling to save API calls
 _MEGA_CAPS = {
     'AAPL','MSFT','GOOGL','GOOG','AMZN','META','NVDA','TSLA','BRK-B','BRK-A',
-    'JPM','V','MA','UNH','JNJ','XOM','PG','HD','LLY','AVGO','ORCL','COST',
-    'WMT','NFLX','ABBV','CRM','MRK','PEP','KO','TMO','MCD','CSCO','ACN',
-    'LIN','ABT','DHR','TXN','QCOM','ISRG','INTU','AMGN','BKNG','ANET',
-    'CMCSA','PFE','NOW','IBM','GE','CAT','RTX','UNP','HON','LOW','SPGI',
-    'DE','BA','MMM','GS','MS','BLK','AXP','SCHW','C','USB','PNC',
+    'JPM','V','MA','UNH','LLY','AVGO','WMT','XOM',
 }
 
 
@@ -1609,7 +1605,7 @@ def get_stock_universe():
     profiles = {}
 
     # Try FMP company-screener (1 call, returns up to 1000 stocks)
-    data = fetch_fmp('company-screener?exchange=NASDAQ,NYSE&marketCapMoreThan=2500000000&marketCapLowerThan=250000000000&limit=1000')
+    data = fetch_fmp('company-screener?exchange=NASDAQ,NYSE&marketCapMoreThan=10000000000&marketCapLowerThan=200000000000&limit=1000')
     print('[EARNINGS] Screener response: type=' + type(data).__name__ + ' len=' + str(len(data) if isinstance(data, list) else 'N/A'))
     if isinstance(data, list) and len(data) > 0:
         print('[EARNINGS] Screener sample: ' + str(data[0])[:200])
@@ -1729,14 +1725,18 @@ def build_earnings_data():
                     and item['symbol'] not in _MEGA_CAPS]
     print('[EARNINGS] After pre-filter (no mega, no dots): ' + str(len(raw_upcoming)))
 
-    # Sort by date chronological
-    raw_upcoming.sort(key=lambda x: x.get('date', ''))
+    # Sort by EPS estimate desc (abs) — large caps with highest EPS first
+    raw_upcoming.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
 
-    # Fetch FMP profiles for top 50 (exchange + mcap filter)
+    # Log first 50 symbols after pre-filter to verify coverage
+    first50 = [item.get('symbol', '?') for item in raw_upcoming[:50]]
+    print('[EARNINGS] First 50 after pre-filter: ' + str(first50))
+
+    # Fetch FMP profiles for top 100 (exchange + mcap filter)
     upcoming = []
     profiled = 0
     for item in raw_upcoming:
-        if profiled >= 50:
+        if profiled >= 100:
             break
         sym = item.get('symbol', '')
         prof_data = fetch_fmp('profile?symbol=' + sym)
@@ -1751,7 +1751,7 @@ def build_earnings_data():
         if exchange not in ('NYSE', 'NASDAQ'):
             continue
         mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
-        if not mcap or mcap < 2.5e9 or mcap > 250e9:
+        if not mcap or mcap < 10e9 or mcap > 200e9:
             continue
         name = prof_detail.get('companyName', '') or prof_detail.get('name', sym)
         sector = prof_detail.get('sector', '')
@@ -1822,7 +1822,7 @@ def build_earnings_data():
         else:
             prof_detail = profiles.get(sym, {})
         mcap = prof_detail.get('mktCap', 0) or prof_detail.get('marketCap', 0) or 0
-        if mcap and (mcap < 2.5e9 or mcap > 250e9):
+        if mcap and (mcap < 10e9 or mcap > 200e9):
             continue
         name = prof_detail.get('companyName', '') or prof_detail.get('name', '') or profiles.get(sym, {}).get('name', sym)
         sector = prof_detail.get('sector', '') or profiles.get(sym, {}).get('sector', '')
