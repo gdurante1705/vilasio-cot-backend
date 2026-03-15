@@ -2082,38 +2082,74 @@ def build_congressional_data():
     today = datetime.date.today()
     today_str = today.isoformat()
     from_30 = (today - datetime.timedelta(days=30)).isoformat()
+    now = datetime.datetime.now()
 
-    # --- Congressional trades from Finnhub ---
+    # --- Congressional trades from Capitol Trades (scraping) ---
     print('[CONGRESS] Fetching congressional trades...')
+    ck_ct = 'congress_capitol_trades'
     congress_trades = []
-    fh_data = fetch_finnhub('stock/congressional-trading?from=' + from_30 + '&to=' + today_str)
-    if isinstance(fh_data, dict) and fh_data.get('data'):
-        for item in fh_data['data']:
-            congress_trades.append({
-                'date': item.get('transactionDate', ''),
-                'name': item.get('name', ''),
-                'party': item.get('party', ''),
-                'chamber': item.get('chamber', ''),
-                'symbol': item.get('symbol', ''),
-                'transaction': item.get('transactionType', ''),
-                'amount': item.get('amountFrom', ''),
-                'amountTo': item.get('amountTo', ''),
-                'asset': item.get('assetName', ''),
+    if ck_ct in _cache and (now - _cache_time.get(ck_ct, now)).total_seconds() < CACHE_TTL:
+        congress_trades = _cache[ck_ct]
+        print('[CONGRESS] Capitol Trades from cache: ' + str(len(congress_trades)))
+    else:
+        try:
+            ct_url = 'https://www.capitoltrades.com/trades'
+            ct_req = urllib.request.Request(ct_url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
             })
-    elif isinstance(fh_data, list):
-        for item in fh_data:
-            congress_trades.append({
-                'date': item.get('transactionDate', item.get('date', '')),
-                'name': item.get('name', item.get('representative', '')),
-                'party': item.get('party', ''),
-                'chamber': item.get('chamber', item.get('house', '')),
-                'symbol': item.get('symbol', item.get('ticker', '')),
-                'transaction': item.get('transactionType', item.get('transaction', '')),
-                'amount': item.get('amountFrom', item.get('amount', '')),
-                'amountTo': item.get('amountTo', ''),
-                'asset': item.get('assetName', item.get('asset', '')),
-            })
-    congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
+            with urllib.request.urlopen(ct_req, timeout=20) as resp:
+                ct_html = resp.read().decode('utf-8')
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(ct_html, 'html.parser')
+            # Capitol Trades uses a table or data rows
+            rows = soup.select('table tbody tr') or soup.select('.trade-row') or soup.select('[data-trade]')
+            if not rows:
+                # Try finding any table rows
+                rows = soup.find_all('tr')
+            for row in rows[:100]:
+                cells = row.find_all('td')
+                if len(cells) < 5:
+                    continue
+                texts = [c.get_text(strip=True) for c in cells]
+                # Capitol Trades typical columns: Politician, Traded, Filed, Owner, Type, Size, Price
+                trade = {
+                    'date': texts[2] if len(texts) > 2 else '',
+                    'name': texts[0] if len(texts) > 0 else '',
+                    'party': '',
+                    'chamber': '',
+                    'symbol': '',
+                    'transaction': texts[4] if len(texts) > 4 else '',
+                    'amount': texts[5] if len(texts) > 5 else '',
+                    'amountTo': '',
+                    'asset': texts[1] if len(texts) > 1 else '',
+                }
+                # Try to extract party from class or text
+                party_el = cells[0].find(class_='party') or cells[0].find('span')
+                if party_el:
+                    pt = party_el.get_text(strip=True).upper()
+                    if 'R' in pt:
+                        trade['party'] = 'R'
+                    elif 'D' in pt:
+                        trade['party'] = 'D'
+                # Try to extract ticker from link
+                ticker_el = row.find('a', href=lambda h: h and '/stocks/' in h) if row else None
+                if ticker_el:
+                    trade['symbol'] = ticker_el.get_text(strip=True).upper()
+                elif len(texts) > 1:
+                    # Fallback: look for uppercase ticker pattern in asset
+                    import re
+                    m = re.search(r'\b([A-Z]{1,5})\b', texts[1])
+                    if m:
+                        trade['symbol'] = m.group(1)
+                congress_trades.append(trade)
+            print('[CONGRESS] Capitol Trades scraped: ' + str(len(congress_trades)))
+        except Exception as e:
+            print('[CONGRESS] Capitol Trades error: ' + str(e))
+            import traceback; traceback.print_exc()
+        congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
+        _cache[ck_ct] = congress_trades
+        _cache_time[ck_ct] = now
     print('[CONGRESS] Congressional trades: ' + str(len(congress_trades)))
 
     # --- Insider trades from Finviz ---
@@ -2133,18 +2169,22 @@ def build_congressional_data():
             df = ins.get_insider()
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
+                    txn = str(row.get('Transaction', ''))
+                    # Filter out Option Exercise — only show Buy and Sale
+                    if 'Option' in txn or 'Exercise' in txn:
+                        continue
                     insider_latest.append({
                         'date': str(row.get('Date', '')),
                         'ticker': str(row.get('Ticker', '')),
                         'owner': str(row.get('Owner', '')),
                         'relationship': str(row.get('Relationship', '')),
-                        'transaction': str(row.get('Transaction', '')),
+                        'transaction': txn,
                         'cost': str(row.get('Cost', '')),
                         'shares': str(row.get('#Shares', '')),
                         'value': str(row.get('Value ($)', row.get('Value', ''))),
                         'sharesTotal': str(row.get('#Shares Total', '')),
                     })
-            print('[CONGRESS] Insider latest: ' + str(len(insider_latest)))
+            print('[CONGRESS] Insider latest (no options): ' + str(len(insider_latest)))
         except Exception as e:
             print('[CONGRESS] Insider latest error: ' + str(e))
         _cache[ck_il] = insider_latest
@@ -2213,7 +2253,6 @@ def build_congressional_data():
             pass
 
     # Smart Money Overlap: check if any insider buy tickers are in PEAD signals
-    # Try to get cached earnings data
     overlap = []
     earnings_ck = 'earnings_main'
     if earnings_ck in _cache:
@@ -2222,11 +2261,16 @@ def build_congressional_data():
         for ins in insider_top_week + insider_latest:
             txn = ins.get('transaction', '')
             if 'Buy' in txn or 'Purchase' in txn:
-                insider_buy_syms.add(ins.get('ticker', ''))
+                t = ins.get('ticker', '')
+                if t:
+                    insider_buy_syms.add(t)
         for ins in congress_trades:
             txn = ins.get('transaction', '')
             if 'Purchase' in txn or 'Buy' in txn:
-                insider_buy_syms.add(ins.get('symbol', ''))
+                s = ins.get('symbol', '')
+                if s:
+                    insider_buy_syms.add(s)
+        print('[CONGRESS] Overlap check: PEAD signals=' + str(pead_syms) + ' insider/congress buys=' + str(list(insider_buy_syms)[:20]))
         common = pead_syms & insider_buy_syms
         for sym in common:
             overlap.append({'symbol': sym, 'sources': []})
