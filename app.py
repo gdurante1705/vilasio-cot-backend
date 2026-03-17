@@ -2084,283 +2084,85 @@ def build_congressional_data():
     from_30 = (today - datetime.timedelta(days=30)).isoformat()
     now = datetime.datetime.now()
 
-    # --- Congressional trades: multi-source with fallback + adaptive time window ---
+    # --- Congressional trades: House Clerk XML (only working source) ---
     print('[CONGRESS] Fetching congressional trades...')
     CONGRESS_CACHE_TTL = 21600  # 6 hours
-    ck_ct = 'congress_trades_v4'
+    ck_ct = 'congress_trades_v5'
     congress_trades = []
     congress_sources = []
-    from_365 = (today - datetime.timedelta(days=365)).isoformat()
     if ck_ct in _cache and (now - _cache_time.get(ck_ct, now)).total_seconds() < CONGRESS_CACHE_TTL:
         congress_trades = _cache[ck_ct]
         congress_sources = _cache.get(ck_ct + '_src', [])
         print('[CONGRESS] Trades from cache: ' + str(len(congress_trades)))
     else:
-        def _parse_github_trades(data, chamber):
-            """Parse GitHub stock watcher JSON into flat trade list (ALL dates)."""
-            all_parsed = []
-            for item in data:
-                transactions = item.get('transactions', [])
-                if transactions and isinstance(transactions, list):
-                    for txn in transactions:
-                        td = txn.get('transaction_date', item.get('date_recieved', ''))
-                        sym = txn.get('ticker', '')
-                        if sym and sym not in ('--', 'N/A', '--\n'):
-                            all_parsed.append({
-                                'date': td or '',
-                                'name': (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip(),
-                                'party': '',
-                                'chamber': chamber,
-                                'symbol': sym.strip(),
-                                'transaction': txn.get('type', ''),
-                                'amount': txn.get('amount', ''),
-                                'asset': txn.get('asset_description', ''),
-                                'disclosure_date': item.get('date_recieved', ''),
-                            })
-                else:
-                    td = item.get('transaction_date', item.get('date_recieved', ''))
-                    sym = item.get('ticker', '')
-                    if sym and sym not in ('--', 'N/A', '--\n'):
-                        name = item.get('senator', '') or item.get('representative', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
-                        all_parsed.append({
-                            'date': td or '',
-                            'name': name,
-                            'party': '',
-                            'chamber': chamber,
-                            'symbol': sym.strip(),
-                            'transaction': item.get('type', ''),
-                            'amount': item.get('amount', ''),
-                            'asset': item.get('asset_description', ''),
-                            'disclosure_date': item.get('disclosure_date', item.get('date_recieved', '')),
-                        })
-            return all_parsed
-
-        def _adaptive_filter(all_parsed, label):
-            """Filter trades: try 30d, then 365d, then latest 100."""
-            filtered = [t for t in all_parsed if t['date'] and t['date'] >= from_30]
-            window = '30 days'
-            if len(filtered) < 5:
-                filtered = [t for t in all_parsed if t['date'] and t['date'] >= from_365]
-                window = '365 days'
-            if len(filtered) < 5:
-                all_sorted = sorted(all_parsed, key=lambda x: x.get('date', ''), reverse=True)
-                filtered = all_sorted[:100]
-                window = 'latest 100 (all time)'
-            print('[CONGRESS] ' + label + ': ' + str(len(filtered)) + ' trades after filter (' + window + ', from ' + str(len(all_parsed)) + ' total)')
-            return filtered, window
-
-        def _fetch_github(url, chamber, label):
-            """Fetch and parse a GitHub raw JSON URL. Returns (trades, source_label) or ([], None)."""
-            try:
-                print('[CONGRESS] Trying ' + label + ': ' + url)
-                req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    status = resp.status
-                    content_length = resp.headers.get('Content-Length', 'unknown')
-                    raw = resp.read()
-                print('[CONGRESS] ' + label + ': HTTP ' + str(status) + ', size=' + str(len(raw)) + ' bytes (Content-Length header: ' + str(content_length) + ')')
-                data = json.loads(raw.decode('utf-8'))
-                if not isinstance(data, list):
-                    print('[CONGRESS] ' + label + ': response is ' + type(data).__name__ + ', not list')
-                    return [], None
-                print('[CONGRESS] ' + label + ': parsed ' + str(len(data)) + ' records')
-                if data:
-                    sample = data[0]
-                    print('[CONGRESS] ' + label + ': first record keys: ' + str(list(sample.keys())[:10]))
-                    dates = [item.get('transaction_date', item.get('date_recieved', '')) for item in data if item.get('transaction_date') or item.get('date_recieved')]
-                    if dates:
-                        dates_clean = [d for d in dates if d]
-                        if dates_clean:
-                            print('[CONGRESS] ' + label + ': date range ' + min(dates_clean) + ' to ' + max(dates_clean))
-                all_parsed = _parse_github_trades(data, chamber)
-                print('[CONGRESS] ' + label + ': ' + str(len(all_parsed)) + ' valid trades (with ticker)')
-                if not all_parsed:
-                    return [], None
-                filtered, window = _adaptive_filter(all_parsed, label)
-                return filtered, 'GitHub ' + label + ' (' + window + ')'
-            except urllib.error.HTTPError as e:
-                print('[CONGRESS] ' + label + ' HTTP error: ' + str(e.code) + ' ' + str(e.reason))
-                return [], None
-            except Exception as e:
-                print('[CONGRESS] ' + label + ' error: ' + type(e).__name__ + ': ' + str(e))
-                return [], None
-
-        # --- Source 1: GitHub Senate ---
-        senate_ok = False
-        trades, src = _fetch_github(
-            'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/aggregate/all_transactions.json',
-            'Senate', 'GitHub Senate')
-        if trades:
-            congress_trades.extend(trades)
-            congress_sources.append(src)
-            senate_ok = True
-
-        # --- Source 1b: efdsearch.senate.gov fallback ---
-        if not senate_ok:
-            try:
-                print('[CONGRESS] Trying efdsearch.senate.gov fallback...')
-                search_url = 'https://efdsearch.senate.gov/search/home/'
-                req0 = urllib.request.Request(search_url, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'text/html,application/xhtml+xml',
+        # --- House: disclosures-clerk.house.gov XML feed ---
+        try:
+            year = today.year
+            fd_url = 'https://disclosures-clerk.house.gov/public_disc/financial-pdfs/' + str(year) + 'FD.xml'
+            print('[CONGRESS] House Clerk: fetching ' + fd_url)
+            req = urllib.request.Request(fd_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                xml_raw = resp.read().decode('utf-8', errors='replace')
+            print('[CONGRESS] House Clerk XML: ' + str(len(xml_raw)) + ' bytes')
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(xml_raw, 'html.parser')
+            members = soup.find_all('member')
+            if not members:
+                members = soup.find_all('row')
+            print('[CONGRESS] House Clerk: ' + str(len(members)) + ' member elements')
+            pdf_base = 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/' + str(year) + '/'
+            count = 0
+            for m in members:
+                filing_type_el = m.find('filingtype')
+                filing_type = filing_type_el.get_text(strip=True) if filing_type_el else ''
+                if 'P' not in filing_type.upper():
+                    continue
+                filing_date_el = m.find('filingdate')
+                filing_date = filing_date_el.get_text(strip=True) if filing_date_el else ''
+                last_el = m.find('last') or m.find('lastname')
+                first_el = m.find('first') or m.find('firstname')
+                prefix_el = m.find('prefix')
+                first_name = first_el.get_text(strip=True) if first_el else ''
+                last_name = last_el.get_text(strip=True) if last_el else ''
+                name = (first_name + ' ' + last_name).strip()
+                state_el = m.find('statedst')
+                state_dst = state_el.get_text(strip=True) if state_el else ''
+                doc_id_el = m.find('docid')
+                doc_id = doc_id_el.get_text(strip=True) if doc_id_el else ''
+                pdf_url = pdf_base + doc_id + '.pdf' if doc_id else ''
+                # Normalize date: MM/DD/YYYY -> YYYY-MM-DD for sorting
+                norm_date = filing_date
+                if '/' in filing_date:
+                    parts = filing_date.split('/')
+                    if len(parts) == 3:
+                        try:
+                            norm_date = parts[2] + '-' + parts[0].zfill(2) + '-' + parts[1].zfill(2)
+                        except:
+                            pass
+                congress_trades.append({
+                    'date': norm_date,
+                    'filing_date_raw': filing_date,
+                    'name': name,
+                    'party': '',
+                    'chamber': 'House',
+                    'state': state_dst,
+                    'symbol': '',
+                    'transaction': 'PTR Filing',
+                    'amount': '',
+                    'asset': '',
+                    'disclosure_date': norm_date,
+                    'doc_id': doc_id,
+                    'pdf_url': pdf_url,
+                    'filing_type': filing_type,
                 })
-                with urllib.request.urlopen(req0, timeout=15) as resp0:
-                    home_html = resp0.read().decode('utf-8')
-                    home_status = resp0.status
-                    cookies_raw = resp0.headers.get_all('Set-Cookie') or []
-                print('[CONGRESS] eFD home: HTTP ' + str(home_status) + ', size=' + str(len(home_html)) + ', cookies=' + str(len(cookies_raw)))
-                cookie_str = '; '.join(c.split(';')[0] for c in cookies_raw)
-                import re as _re
-                csrf_match = _re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', home_html)
-                if not csrf_match:
-                    # Try alternate patterns
-                    csrf_match = _re.search(r'csrfmiddlewaretoken["\s:]+([a-zA-Z0-9]{20,})', home_html)
-                if csrf_match:
-                    csrf = csrf_match.group(1)
-                    print('[CONGRESS] eFD CSRF found: ' + csrf[:20] + '...')
-                    from_date = (today - datetime.timedelta(days=90)).strftime('%m/%d/%Y')
-                    to_date = today.strftime('%m/%d/%Y')
-                    # The eFD search API expects specific params for PTR (Periodic Transaction Report)
-                    post_data = urllib.parse.urlencode({
-                        'csrfmiddlewaretoken': csrf,
-                        'report_type': '11',
-                        'filer_type': '1',
-                        'submitted_start_date': from_date,
-                        'submitted_end_date': to_date,
-                    }).encode('utf-8')
-                    search_api = 'https://efdsearch.senate.gov/search/report/data/'
-                    req1 = urllib.request.Request(search_api, data=post_data, headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Referer': search_url,
-                        'Cookie': cookie_str,
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    })
-                    with urllib.request.urlopen(req1, timeout=20) as resp1:
-                        resp1_raw = resp1.read().decode('utf-8')
-                        resp1_status = resp1.status
-                    print('[CONGRESS] eFD search: HTTP ' + str(resp1_status) + ', size=' + str(len(resp1_raw)) + ', preview=' + resp1_raw[:500])
-                    result_data = json.loads(resp1_raw)
-                    records = result_data.get('data', result_data) if isinstance(result_data, dict) else result_data
-                    if isinstance(records, list) and records:
-                        print('[CONGRESS] eFD search: ' + str(len(records)) + ' records, first=' + str(records[0])[:200])
-                        from html.parser import HTMLParser
-                        class _TagStripper(HTMLParser):
-                            def __init__(self):
-                                super().__init__()
-                                self.text = ''
-                            def handle_data(self, d):
-                                self.text += d
-                        def strip_tags(h):
-                            s = _TagStripper()
-                            s.feed(str(h))
-                            return s.text.strip()
-                        count = 0
-                        for row in records:
-                            if isinstance(row, list) and len(row) >= 4:
-                                name_parts = [strip_tags(row[i]) for i in range(min(2, len(row)))]
-                                name = ' '.join(name_parts).strip()
-                                date_str = strip_tags(row[4]) if len(row) > 4 else strip_tags(row[-1])
-                                congress_trades.append({
-                                    'date': date_str,
-                                    'name': name,
-                                    'party': '',
-                                    'chamber': 'Senate',
-                                    'symbol': '',
-                                    'transaction': 'PTR Filing',
-                                    'amount': '',
-                                    'asset': strip_tags(row[3]) if len(row) > 3 else '',
-                                    'disclosure_date': date_str,
-                                })
-                                count += 1
-                            elif isinstance(row, dict):
-                                name = row.get('name', row.get('first_name', '') + ' ' + row.get('last_name', '')).strip()
-                                date_str = row.get('date', row.get('submitted_date', ''))
-                                congress_trades.append({
-                                    'date': date_str,
-                                    'name': name,
-                                    'party': '',
-                                    'chamber': 'Senate',
-                                    'symbol': row.get('ticker', ''),
-                                    'transaction': 'PTR Filing',
-                                    'amount': '',
-                                    'asset': row.get('report_type', ''),
-                                    'disclosure_date': date_str,
-                                })
-                                count += 1
-                        print('[CONGRESS] eFD Senate: parsed ' + str(count) + ' filings')
-                        if count > 0:
-                            congress_sources.append('efdsearch.senate.gov')
-                    else:
-                        print('[CONGRESS] eFD search: records is ' + type(records).__name__ + ', len=' + str(len(records) if isinstance(records, (list, dict)) else 'N/A'))
-                else:
-                    print('[CONGRESS] eFD: no CSRF token found in home page (searched ' + str(len(home_html)) + ' chars)')
-            except Exception as e:
-                import traceback
-                print('[CONGRESS] eFD Senate error: ' + type(e).__name__ + ': ' + str(e))
-                traceback.print_exc()
-
-        # --- Source 2: GitHub House ---
-        house_ok = False
-        for house_url in [
-            'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/data/all_transactions.json',
-            'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/aggregate/all_transactions.json',
-        ]:
-            trades, src = _fetch_github(house_url, 'House', 'GitHub House')
-            if trades:
-                congress_trades.extend(trades)
-                congress_sources.append(src)
-                house_ok = True
-                break
-
-        # --- Source 2b: disclosures-clerk.house.gov fallback ---
-        if not house_ok:
-            try:
-                print('[CONGRESS] Trying disclosures-clerk.house.gov fallback...')
-                year = today.year
-                # House publishes a ZIP of all PTR filings per year
-                fd_url = 'https://disclosures-clerk.house.gov/public_disc/financial-pdfs/' + str(year) + 'FD.xml'
-                print('[CONGRESS] House Clerk: trying XML feed ' + fd_url)
-                req = urllib.request.Request(fd_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    xml_raw = resp.read().decode('utf-8', errors='replace')
-                    clerk_status = resp.status
-                print('[CONGRESS] House Clerk XML: HTTP ' + str(clerk_status) + ', size=' + str(len(xml_raw)) + ', preview=' + xml_raw[:500])
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(xml_raw, 'html.parser')
-                members = soup.find_all('member')
-                if not members:
-                    members = soup.find_all('row')
-                print('[CONGRESS] House Clerk: found ' + str(len(members)) + ' member/row elements')
-                count = 0
-                for m in members:
-                    filing_date = (m.find('filingdate') or m.find('filing_date'))
-                    filing_date = filing_date.get_text(strip=True) if filing_date else ''
-                    last_el = m.find('last') or m.find('lastname')
-                    first_el = m.find('first') or m.find('firstname')
-                    name = ((first_el.get_text(strip=True) if first_el else '') + ' ' + (last_el.get_text(strip=True) if last_el else '')).strip()
-                    doc_type = m.find('filingtype')
-                    doc_type = doc_type.get_text(strip=True) if doc_type else ''
-                    if 'P' in doc_type.upper():  # PTR filings
-                        congress_trades.append({
-                            'date': filing_date,
-                            'name': name,
-                            'party': '',
-                            'chamber': 'House',
-                            'symbol': '',
-                            'transaction': 'PTR Filing',
-                            'amount': '',
-                            'asset': doc_type,
-                            'disclosure_date': filing_date,
-                        })
-                        count += 1
-                print('[CONGRESS] House Clerk: ' + str(count) + ' PTR filings')
-                if count > 0:
-                    congress_sources.append('disclosures-clerk.house.gov')
-            except Exception as e:
-                import traceback
-                print('[CONGRESS] House Clerk error: ' + type(e).__name__ + ': ' + str(e))
-                traceback.print_exc()
+                count += 1
+            print('[CONGRESS] House Clerk: ' + str(count) + ' PTR filings parsed')
+            if count > 0:
+                congress_sources.append('disclosures-clerk.house.gov')
+        except Exception as e:
+            import traceback
+            print('[CONGRESS] House Clerk error: ' + type(e).__name__ + ': ' + str(e))
+            traceback.print_exc()
 
         congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
         _cache[ck_ct] = congress_trades
@@ -2571,172 +2373,9 @@ def api_congressional_refresh():
     return api_congressional()
 
 
-@app.route('/api/congressional/debug')
-def api_congressional_debug():
-    """Temporary debug: test each data source step by step."""
-    results = {}
-    today = datetime.date.today()
-
-    # --- Test 1: GitHub Senate ---
-    gh_senate = {'url': 'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/aggregate/all_transactions.json'}
-    try:
-        req = urllib.request.Request(gh_senate['url'], headers={'User-Agent': 'Vilasio/3.7'})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            gh_senate['status'] = resp.status
-            gh_senate['content_length'] = resp.headers.get('Content-Length', 'unknown')
-            raw = resp.read()
-            gh_senate['actual_size_bytes'] = len(raw)
-            gh_senate['preview'] = raw[:500].decode('utf-8', errors='replace')
-        data = json.loads(raw.decode('utf-8'))
-        gh_senate['type'] = type(data).__name__
-        if isinstance(data, list):
-            gh_senate['total_records'] = len(data)
-            if data:
-                gh_senate['first_record_keys'] = list(data[0].keys())
-                gh_senate['first_record_sample'] = {k: str(v)[:100] for k, v in data[0].items()}
-                # Date range
-                dates = []
-                for item in data:
-                    d = item.get('transaction_date', item.get('date_recieved', ''))
-                    if d:
-                        dates.append(d)
-                    for txn in item.get('transactions', []):
-                        d2 = txn.get('transaction_date', '')
-                        if d2:
-                            dates.append(d2)
-                dates_clean = [d for d in dates if d and len(d) >= 8]
-                if dates_clean:
-                    gh_senate['date_min'] = min(dates_clean)
-                    gh_senate['date_max'] = max(dates_clean)
-                    gh_senate['dates_count'] = len(dates_clean)
-                    # Count by window
-                    from_30 = (today - datetime.timedelta(days=30)).isoformat()
-                    from_365 = (today - datetime.timedelta(days=365)).isoformat()
-                    gh_senate['trades_last_30d'] = len([d for d in dates_clean if d >= from_30])
-                    gh_senate['trades_last_365d'] = len([d for d in dates_clean if d >= from_365])
-                # Count valid tickers
-                tickers = set()
-                for item in data:
-                    t = item.get('ticker', '')
-                    if t and t not in ('--', 'N/A'):
-                        tickers.add(t)
-                    for txn in item.get('transactions', []):
-                        t2 = txn.get('ticker', '')
-                        if t2 and t2 not in ('--', 'N/A'):
-                            tickers.add(t2)
-                gh_senate['unique_tickers'] = len(tickers)
-                gh_senate['sample_tickers'] = list(tickers)[:20]
-    except urllib.error.HTTPError as e:
-        gh_senate['error'] = 'HTTP ' + str(e.code) + ' ' + str(e.reason)
-    except Exception as e:
-        gh_senate['error'] = type(e).__name__ + ': ' + str(e)
-    results['github_senate'] = gh_senate
-
-    # --- Test 2: GitHub House ---
-    for label, url in [('github_house_data', 'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/data/all_transactions.json'),
-                       ('github_house_aggregate', 'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/aggregate/all_transactions.json')]:
-        gh = {'url': url}
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                gh['status'] = resp.status
-                gh['content_length'] = resp.headers.get('Content-Length', 'unknown')
-                raw = resp.read()
-                gh['actual_size_bytes'] = len(raw)
-                gh['preview'] = raw[:300].decode('utf-8', errors='replace')
-            data = json.loads(raw.decode('utf-8'))
-            gh['type'] = type(data).__name__
-            if isinstance(data, list):
-                gh['total_records'] = len(data)
-                if data:
-                    gh['first_record_keys'] = list(data[0].keys())
-        except urllib.error.HTTPError as e:
-            gh['error'] = 'HTTP ' + str(e.code) + ' ' + str(e.reason)
-        except Exception as e:
-            gh['error'] = type(e).__name__ + ': ' + str(e)
-        results[label] = gh
-
-    # --- Test 3: efdsearch.senate.gov ---
-    efd = {}
-    try:
-        search_url = 'https://efdsearch.senate.gov/search/home/'
-        req0 = urllib.request.Request(search_url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        })
-        with urllib.request.urlopen(req0, timeout=15) as resp0:
-            home_html = resp0.read().decode('utf-8')
-            efd['home_status'] = resp0.status
-            efd['home_size'] = len(home_html)
-            cookies_raw = resp0.headers.get_all('Set-Cookie') or []
-            efd['cookies_count'] = len(cookies_raw)
-        cookie_str = '; '.join(c.split(';')[0] for c in cookies_raw)
-        import re as _re
-        csrf_match = _re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', home_html)
-        efd['csrf_found'] = bool(csrf_match)
-        if csrf_match:
-            csrf = csrf_match.group(1)
-            efd['csrf_preview'] = csrf[:20] + '...'
-            from_date = (today - datetime.timedelta(days=90)).strftime('%m/%d/%Y')
-            to_date = today.strftime('%m/%d/%Y')
-            post_data = urllib.parse.urlencode({
-                'csrfmiddlewaretoken': csrf,
-                'report_type': '11',
-                'filer_type': '1',
-                'submitted_start_date': from_date,
-                'submitted_end_date': to_date,
-            }).encode('utf-8')
-            req1 = urllib.request.Request('https://efdsearch.senate.gov/search/report/data/', data=post_data, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': search_url,
-                'Cookie': cookie_str,
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'X-Requested-With': 'XMLHttpRequest',
-            })
-            with urllib.request.urlopen(req1, timeout=20) as resp1:
-                resp1_raw = resp1.read().decode('utf-8')
-                efd['search_status'] = resp1.status
-                efd['search_size'] = len(resp1_raw)
-                efd['search_preview'] = resp1_raw[:500]
-            try:
-                parsed = json.loads(resp1_raw)
-                efd['search_type'] = type(parsed).__name__
-                if isinstance(parsed, dict):
-                    efd['search_keys'] = list(parsed.keys())
-                    if 'data' in parsed:
-                        efd['data_count'] = len(parsed['data'])
-                        if parsed['data']:
-                            efd['data_first'] = str(parsed['data'][0])[:300]
-                elif isinstance(parsed, list):
-                    efd['data_count'] = len(parsed)
-                    if parsed:
-                        efd['data_first'] = str(parsed[0])[:300]
-            except:
-                efd['search_json_parse'] = 'FAILED'
-        else:
-            efd['home_preview'] = home_html[:500]
-    except Exception as e:
-        efd['error'] = type(e).__name__ + ': ' + str(e)
-    results['efdsearch'] = efd
-
-    # --- Test 4: House Clerk ---
-    clerk = {}
-    try:
-        year = today.year
-        fd_url = 'https://disclosures-clerk.house.gov/public_disc/financial-pdfs/' + str(year) + 'FD.xml'
-        clerk['url'] = fd_url
-        req = urllib.request.Request(fd_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode('utf-8', errors='replace')
-            clerk['status'] = resp.status
-            clerk['size'] = len(raw)
-            clerk['preview'] = raw[:500]
-    except urllib.error.HTTPError as e:
-        clerk['error'] = 'HTTP ' + str(e.code) + ' ' + str(e.reason)
-    except Exception as e:
-        clerk['error'] = type(e).__name__ + ': ' + str(e)
-    results['house_clerk'] = clerk
-
-    return jsonify(results)
+# Debug endpoint removed — diagnostics complete.
+# Working source: disclosures-clerk.house.gov (House XML feed)
+# Non-working: GitHub repos (stale 2019 / 404), efdsearch.senate.gov (503)
 
 
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
