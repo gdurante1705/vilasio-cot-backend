@@ -1539,34 +1539,66 @@ def fetch_checkonchain_metric(url, cache_key, ttl=43200):
         with urllib.request.urlopen(req, timeout=60) as resp:
             html = resp.read().decode('utf-8', errors='replace')
 
-        # Plotly HTML exports embed chart data as JSON.
-        # Strategy: find the JSON data array from Plotly.newPlot/react calls or embedded blobs.
-        match_str = None
+        # Plotly HTML exports embed data as a JSON blob inside a <script> tag.
+        # Strategy: find the start of the data array, then use bracket matching
+        # to extract the full JSON (regex .*? truncates on first ] which is wrong).
+        data_arr = None
 
-        # Pattern 1: Plotly.newPlot("id", [traces], layout)
-        m = re.search(r'Plotly\.(?:newPlot|react)\(\s*["\'][^"\']+["\']\s*,\s*(\[.*?\])\s*,\s*\{', html, re.DOTALL)
-        if m:
-            match_str = m.group(1)
-
-        # Pattern 2: "data": [{...}] inside a larger JSON object
-        if not match_str:
-            m = re.search(r'"data"\s*:\s*(\[\s*\{.*?\}\s*\])', html, re.DOTALL)
-            if m:
-                match_str = m.group(1)
-
-        # Pattern 3: largest JSON array block in the file
-        if not match_str:
-            blocks = re.findall(r'(\[\s*\{\s*"[^"]*"\s*:.*?\}\s*\])', html, re.DOTALL)
-            if blocks:
-                match_str = max(blocks, key=len)
-
-        if not match_str:
-            print('[ONCHAIN] ' + cache_key + ': no Plotly data found in HTML (' + str(len(html)) + ' bytes)')
+        def extract_json_array(text, start_pos):
+            """Extract a balanced JSON array starting at text[start_pos] = '['."""
+            depth = 0
+            i = start_pos
+            while i < len(text):
+                c = text[i]
+                if c == '[':
+                    depth += 1
+                elif c == ']':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start_pos:i + 1])
+                        except json.JSONDecodeError:
+                            return None
+                elif c == '"':
+                    # Skip string contents (avoid counting brackets inside strings)
+                    i += 1
+                    while i < len(text) and text[i] != '"':
+                        if text[i] == '\\':
+                            i += 1  # skip escaped char
+                        i += 1
+                i += 1
             return None
 
-        data_arr = json.loads(match_str)
-        if not isinstance(data_arr, list) or not data_arr:
-            print('[ONCHAIN] ' + cache_key + ': parsed data is not a non-empty list')
+        # Pattern 1: Plotly.newPlot("id", [data], layout)
+        m = re.search(r'Plotly\.(?:newPlot|react)\(\s*["\'][^"\']+["\']\s*,\s*\[', html)
+        if m:
+            arr_start = m.end() - 1  # position of the '['
+            data_arr = extract_json_array(html, arr_start)
+            if data_arr:
+                print('[ONCHAIN] ' + cache_key + ': extracted via Plotly.newPlot pattern')
+
+        # Pattern 2: "data": [{...}] inside a larger JSON object
+        if not data_arr:
+            m = re.search(r'"data"\s*:\s*\[', html)
+            if m:
+                arr_start = m.end() - 1
+                data_arr = extract_json_array(html, arr_start)
+                if data_arr:
+                    print('[ONCHAIN] ' + cache_key + ': extracted via "data":[] pattern')
+
+        # Pattern 3: find all top-level [ positions and try the largest valid array
+        if not data_arr:
+            candidates = []
+            for m in re.finditer(r'\[\s*\{', html):
+                arr = extract_json_array(html, m.start())
+                if arr and isinstance(arr, list) and len(arr) > 0:
+                    candidates.append(arr)
+            if candidates:
+                data_arr = max(candidates, key=lambda a: sum(len(t.get('x', [])) for t in a if isinstance(t, dict)))
+                print('[ONCHAIN] ' + cache_key + ': extracted largest candidate array')
+
+        if not data_arr or not isinstance(data_arr, list):
+            print('[ONCHAIN] ' + cache_key + ': no Plotly data found in HTML (' + str(len(html)) + ' bytes)')
             return None
 
         dates = None
@@ -1589,9 +1621,11 @@ def fetch_checkonchain_metric(url, cache_key, ttl=43200):
                     clean_y.append(round(float(v), 6) if v is not None else None)
                 except (ValueError, TypeError):
                     clean_y.append(None)
+            non_null_count = len([v for v in clean_y if v is not None])
+            print('[ONCHAIN] ' + cache_key + ' trace "' + str(name) + '": ' + str(len(clean_y)) + ' values, ' + str(non_null_count) + ' non-null')
             series[name] = clean_y
-            non_none = [v for v in clean_y if v is not None]
-            if non_none:
+            if non_null_count > 0:
+                non_none = [v for v in clean_y if v is not None]
                 latest[name] = non_none[-1]
 
         if not dates or not series:
