@@ -1749,6 +1749,16 @@ def api_onchain_advanced_refresh():
     return api_onchain_advanced()
 
 
+@app.route('/api/onchain/clear-cache')
+def api_onchain_clear_cache():
+    keys = [k for k in list(_cache.keys()) if k.startswith('coc_') or k.startswith('onchain_') or k.startswith('test_coc')]
+    for k in keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[ONCHAIN] All on-chain cache cleared (' + str(len(keys)) + ' keys)')
+    return jsonify({'status': 'cleared', 'keys_removed': len(keys)})
+
+
 @app.route('/api/onchain/test-coc')
 def api_test_coc():
     """Temporary: test Plotly scraping from CheckOnChain on Render."""
