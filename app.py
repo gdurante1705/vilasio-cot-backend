@@ -1594,12 +1594,36 @@ def fetch_checkonchain_metric(url, cache_key, ttl=43200):
                 if arr and isinstance(arr, list) and len(arr) > 0:
                     candidates.append(arr)
             if candidates:
-                data_arr = max(candidates, key=lambda a: sum(len(t.get('x', [])) for t in a if isinstance(t, dict)))
+                data_arr = max(candidates, key=lambda a: sum(len(t.get('x', [])) if isinstance(t.get('x'), list) else len(t.get('x', {}).get('bdata', '')) for t in a if isinstance(t, dict)))
                 print('[ONCHAIN] ' + cache_key + ': extracted largest candidate array')
 
         if not data_arr or not isinstance(data_arr, list):
             print('[ONCHAIN] ' + cache_key + ': no Plotly data found in HTML (' + str(len(html)) + ' bytes)')
             return None
+
+        import base64
+        import struct
+
+        def decode_bdata(obj):
+            """Decode Plotly binary data (bdata) to a Python list."""
+            if isinstance(obj, list):
+                return obj
+            if isinstance(obj, dict) and 'bdata' in obj:
+                dtype = obj.get('dtype', 'f8')
+                raw = base64.b64decode(obj['bdata'])
+                if dtype == 'f8':
+                    count = len(raw) // 8
+                    return list(struct.unpack('<' + str(count) + 'd', raw))
+                elif dtype == 'f4':
+                    count = len(raw) // 4
+                    return list(struct.unpack('<' + str(count) + 'f', raw))
+                elif dtype == 'i4':
+                    count = len(raw) // 4
+                    return list(struct.unpack('<' + str(count) + 'i', raw))
+                elif dtype == 'i2':
+                    count = len(raw) // 2
+                    return list(struct.unpack('<' + str(count) + 'h', raw))
+            return []
 
         dates = None
         series = {}
@@ -1609,16 +1633,18 @@ def fetch_checkonchain_metric(url, cache_key, ttl=43200):
             if not isinstance(trace, dict):
                 continue
             name = trace.get('name', 'trace_' + str(len(series)))
-            x = trace.get('x', [])
-            y = trace.get('y', [])
+            x = decode_bdata(trace.get('x', []))
+            y = decode_bdata(trace.get('y', []))
             if not x or not y:
                 continue
             if dates is None:
                 dates = [str(d)[:10] for d in x]
             clean_y = []
+            import math
             for v in y:
                 try:
-                    clean_y.append(round(float(v), 6) if v is not None else None)
+                    fv = float(v)
+                    clean_y.append(round(fv, 6) if not math.isnan(fv) and not math.isinf(fv) else None)
                 except (ValueError, TypeError):
                     clean_y.append(None)
             non_null_count = len([v for v in clean_y if v is not None])
