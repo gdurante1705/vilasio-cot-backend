@@ -2084,44 +2084,67 @@ def build_congressional_data():
     from_30 = (today - datetime.timedelta(days=30)).isoformat()
     now = datetime.datetime.now()
 
-    # --- Congressional trades from FMP senate-latest + house-latest ---
-    print('[CONGRESS] Fetching congressional trades (FMP)...')
-    FMP_API_KEY = os.environ.get('FMP_API_KEY', '')
-    ck_ct = 'congress_fmp_trades'
+    # --- Congressional trades from Senate/House Stock Watcher (free, no auth) ---
+    print('[CONGRESS] Fetching congressional trades (Stock Watcher APIs)...')
+    CONGRESS_CACHE_TTL = 21600  # 6 hours
+    ck_ct = 'congress_stockwatcher_trades'
     congress_trades = []
-    if ck_ct in _cache and (now - _cache_time.get(ck_ct, now)).total_seconds() < CACHE_TTL:
+    if ck_ct in _cache and (now - _cache_time.get(ck_ct, now)).total_seconds() < CONGRESS_CACHE_TTL:
         congress_trades = _cache[ck_ct]
-        print('[CONGRESS] FMP trades from cache: ' + str(len(congress_trades)))
+        print('[CONGRESS] Stock Watcher trades from cache: ' + str(len(congress_trades)))
     else:
-        if FMP_API_KEY:
-            fmp_base = 'https://financialmodelingprep.com/stable'
-            for chamber, endpoint in [('Senate', 'senate-latest'), ('House', 'house-latest')]:
-                try:
-                    url = fmp_base + '/' + endpoint + '?page=0&limit=100&apikey=' + FMP_API_KEY
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-                    _time.sleep(0.5)
-                    with urllib.request.urlopen(req, timeout=20) as resp:
-                        data = json.loads(resp.read().decode('utf-8'))
-                    if isinstance(data, list):
-                        for item in data:
-                            congress_trades.append({
-                                'date': item.get('transactionDate', item.get('disclosureDate', '')),
-                                'name': item.get('representative', item.get('firstName', '') + ' ' + item.get('lastName', '')).strip(),
-                                'party': item.get('party', ''),
-                                'chamber': chamber,
-                                'symbol': item.get('ticker', item.get('symbol', '')),
-                                'transaction': item.get('type', item.get('transactionType', '')),
-                                'amount': item.get('amount', ''),
-                                'amountTo': '',
-                                'asset': item.get('assetDescription', item.get('asset', '')),
-                            })
-                        print('[CONGRESS] FMP ' + chamber + ': ' + str(len(data)) + ' trades')
+        endpoints = [
+            ('Senate', 'https://senatestockwatcher.com/api'),
+            ('House', 'https://housestockwatcher.com/api'),
+        ]
+        for chamber, api_url in endpoints:
+            try:
+                req = urllib.request.Request(api_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+                _time.sleep(0.5)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                records = data if isinstance(data, list) else data.get('data', data.get('records', []))
+                if not isinstance(records, list):
+                    print('[CONGRESS] ' + chamber + ' Stock Watcher: unexpected response')
+                    continue
+                count = 0
+                for item in records:
+                    # Handle nested transactions array (Senate format)
+                    transactions = item.get('transactions', [])
+                    if transactions and isinstance(transactions, list):
+                        for txn in transactions:
+                            trade_date = txn.get('transaction_date', item.get('date_recieved', ''))
+                            if trade_date >= from_30:
+                                congress_trades.append({
+                                    'date': trade_date,
+                                    'name': (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip(),
+                                    'party': '',
+                                    'chamber': chamber,
+                                    'symbol': txn.get('ticker', ''),
+                                    'transaction': txn.get('type', ''),
+                                    'amount': txn.get('amount', ''),
+                                    'asset': txn.get('asset_description', ''),
+                                })
+                                count += 1
                     else:
-                        print('[CONGRESS] FMP ' + chamber + ': unexpected response type=' + type(data).__name__)
-                except Exception as e:
-                    print('[CONGRESS] FMP ' + chamber + ' error: ' + str(e))
-        else:
-            print('[CONGRESS] No FMP_API_KEY, skipping congressional trades')
+                        # Flat record format
+                        trade_date = item.get('transaction_date', item.get('date_recieved', ''))
+                        if trade_date >= from_30:
+                            name = item.get('representative', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
+                            congress_trades.append({
+                                'date': trade_date,
+                                'name': name,
+                                'party': '',
+                                'chamber': chamber,
+                                'symbol': item.get('ticker', ''),
+                                'transaction': item.get('type', item.get('transaction_type', '')),
+                                'amount': item.get('amount', ''),
+                                'asset': item.get('asset_description', ''),
+                            })
+                            count += 1
+                print('[CONGRESS] ' + chamber + ' Stock Watcher: ' + str(count) + ' trades (last 30 days)')
+            except Exception as e:
+                print('[CONGRESS] ' + chamber + ' Stock Watcher error: ' + str(e))
         congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
         _cache[ck_ct] = congress_trades
         _cache_time[ck_ct] = now
@@ -2281,7 +2304,7 @@ def api_congressional():
     try:
         ck = 'congressional_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 10800:  # 3h cache
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 21600:  # 6h cache
             return jsonify(_cache[ck])
         data = build_congressional_data()
         result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
