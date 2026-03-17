@@ -2205,9 +2205,59 @@ def build_congressional_data():
         _cache_time[cache_key] = _now
         return result
 
+    def _scrape_finviz_insider_url(url, cache_key):
+        """Fallback: scrape Finviz insider trading page directly with BeautifulSoup."""
+        _now = datetime.datetime.now()
+        if cache_key in _cache and (_now - _cache_time.get(cache_key, _now)).total_seconds() < CACHE_TTL:
+            print('[CONGRESS] Direct scrape from cache: ' + str(len(_cache[cache_key])))
+            return _cache[cache_key]
+        result = []
+        try:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                html = resp.read().decode('utf-8', errors='replace')
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+            table = soup.find('table', class_='body-table')
+            if not table:
+                for t in soup.find_all('table'):
+                    if t.find('td', string=lambda s: s and ('Buy' in str(s) or 'Sale' in str(s))):
+                        table = t
+                        break
+            if table:
+                rows = table.find_all('tr')
+                for row in rows[1:]:
+                    cells = row.find_all('td')
+                    if len(cells) >= 9:
+                        result.append({
+                            'ticker': cells[0].get_text(strip=True),
+                            'owner': cells[1].get_text(strip=True),
+                            'relationship': cells[2].get_text(strip=True),
+                            'date': cells[3].get_text(strip=True),
+                            'transaction': cells[4].get_text(strip=True),
+                            'cost': cells[5].get_text(strip=True),
+                            'shares': cells[6].get_text(strip=True),
+                            'value': cells[7].get_text(strip=True),
+                            'sharesTotal': cells[8].get_text(strip=True),
+                            'secForm4': cells[9].get_text(strip=True) if len(cells) > 9 else '',
+                        })
+            print('[CONGRESS] Finviz direct scrape: ' + str(len(result)) + ' trades from ' + url)
+        except Exception as e:
+            print('[CONGRESS] Finviz direct scrape error: ' + str(e))
+        _cache[cache_key] = result
+        _cache_time[cache_key] = _now
+        return result
+
     insider_latest = _fetch_finviz_insider('latest', 'fvz_insider_latest')
     insider_top_week = _fetch_finviz_insider('top week', 'fvz_insider_topweek')
     insider_top_owner = _fetch_finviz_insider('top owner week', 'fvz_insider_topowner')
+    if not insider_top_owner:
+        insider_top_owner = _scrape_finviz_insider_url(
+            'https://finviz.com/insidertrading.ashx?or=10&tv=1000000&tc=7&o=-transactionvalue',
+            'fvz_insider_topowner_direct'
+        )
 
     # --- Stats ---
     all_insider = insider_latest + insider_top_week + insider_top_owner
