@@ -2084,32 +2084,29 @@ def build_congressional_data():
     from_30 = (today - datetime.timedelta(days=30)).isoformat()
     now = datetime.datetime.now()
 
-    # --- Congressional trades from Senate/House Stock Watcher (free, no auth) ---
-    print('[CONGRESS] Fetching congressional trades (Stock Watcher APIs)...')
-    CONGRESS_CACHE_TTL = 21600  # 6 hours
-    ck_ct = 'congress_stockwatcher_trades'
+    # --- Congressional trades from GitHub raw JSON (timothycarambat repos) ---
+    print('[CONGRESS] Fetching congressional trades (GitHub raw JSON)...')
+    CONGRESS_CACHE_TTL = 43200  # 12 hours
+    ck_ct = 'congress_github_trades'
     congress_trades = []
     if ck_ct in _cache and (now - _cache_time.get(ck_ct, now)).total_seconds() < CONGRESS_CACHE_TTL:
         congress_trades = _cache[ck_ct]
-        print('[CONGRESS] Stock Watcher trades from cache: ' + str(len(congress_trades)))
+        print('[CONGRESS] GitHub trades from cache: ' + str(len(congress_trades)))
     else:
         endpoints = [
-            ('Senate', 'https://senatestockwatcher.com/api'),
-            ('House', 'https://housestockwatcher.com/api'),
+            ('Senate', 'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/main/data/all_transactions.json'),
+            ('House', 'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/main/data/all_transactions.json'),
         ]
-        for chamber, api_url in endpoints:
+        for chamber, raw_url in endpoints:
             try:
-                req = urllib.request.Request(api_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-                _time.sleep(0.5)
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                req = urllib.request.Request(raw_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+                with urllib.request.urlopen(req, timeout=60) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
-                records = data if isinstance(data, list) else data.get('data', data.get('records', []))
-                if not isinstance(records, list):
-                    print('[CONGRESS] ' + chamber + ' Stock Watcher: unexpected response')
+                if not isinstance(data, list):
+                    print('[CONGRESS] ' + chamber + ' GitHub: unexpected response type=' + type(data).__name__)
                     continue
                 count = 0
-                for item in records:
-                    # Handle nested transactions array (Senate format)
+                for item in data:
                     transactions = item.get('transactions', [])
                     if transactions and isinstance(transactions, list):
                         for txn in transactions:
@@ -2127,7 +2124,6 @@ def build_congressional_data():
                                 })
                                 count += 1
                     else:
-                        # Flat record format
                         trade_date = item.get('transaction_date', item.get('date_recieved', ''))
                         if trade_date >= from_30:
                             name = item.get('representative', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
@@ -2142,9 +2138,9 @@ def build_congressional_data():
                                 'asset': item.get('asset_description', ''),
                             })
                             count += 1
-                print('[CONGRESS] ' + chamber + ' Stock Watcher: ' + str(count) + ' trades (last 30 days)')
+                print('[CONGRESS] ' + chamber + ' GitHub: ' + str(count) + ' trades (last 30 days)')
             except Exception as e:
-                print('[CONGRESS] ' + chamber + ' Stock Watcher error: ' + str(e))
+                print('[CONGRESS] ' + chamber + ' GitHub error: ' + str(e))
         congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
         _cache[ck_ct] = congress_trades
         _cache_time[ck_ct] = now
@@ -2304,7 +2300,7 @@ def api_congressional():
     try:
         ck = 'congressional_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 21600:  # 6h cache
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 43200:  # 12h cache
             return jsonify(_cache[ck])
         data = build_congressional_data()
         result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
