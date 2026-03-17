@@ -1523,6 +1523,164 @@ def api_onchain_refresh():
     print('[ONCHAIN] Cache cleared (' + str(len(keys)) + ' keys)')
     return api_onchain()
 
+
+# ─── ON-CHAIN ADVANCED (CheckOnChain via ocfinance) ─────────────────────────
+
+def fetch_checkonchain_metric(url, cache_key, ttl=43200):
+    """Fetch on-chain metric from CheckOnChain via ocfinance. Cache 12h."""
+    now = datetime.datetime.now()
+    if cache_key in _cache and (now - _cache_time.get(cache_key, now)).total_seconds() < ttl:
+        return _cache[cache_key]
+    try:
+        import ocfinance as of
+        import pandas as pd
+        df = of.download(url)
+        if df is not None and not df.empty:
+            result = {
+                'dates': [str(d)[:10] for d in df.index],
+                'series': {},
+            }
+            for col in df.columns:
+                result['series'][col] = [None if pd.isna(v) else round(float(v), 4) for v in df[col]]
+            result['latest'] = {}
+            for col in df.columns:
+                vals = df[col].dropna()
+                if len(vals) > 0:
+                    result['latest'][col] = round(float(vals.iloc[-1]), 4)
+            _cache[cache_key] = result
+            _cache_time[cache_key] = now
+            print('[ONCHAIN] CheckOnChain ' + cache_key + ': ' + str(len(df)) + ' rows, ' + str(len(df.columns)) + ' cols')
+            return result
+    except Exception as e:
+        print('[ONCHAIN] CheckOnChain ' + cache_key + ' error: ' + str(e))
+    return None
+
+
+@app.route('/api/onchain/advanced')
+def api_onchain_advanced():
+    ck = 'onchain_advanced_main'
+    now = datetime.datetime.now()
+    if ck in _cache and (now - _cache_time.get(ck, now)).total_seconds() < 43200:
+        return jsonify(_cache[ck])
+
+    metrics = {}
+
+    metrics['mvrv'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/unrealised/mvrv_all/mvrv_all_light.html',
+        'coc_mvrv')
+
+    metrics['puell'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/mining/puellmultiple/puellmultiple_light.html',
+        'coc_puell')
+
+    metrics['pi_cycle'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/pricing/pricing_picycleindicator/pricing_picycleindicator_light.html',
+        'coc_picycle')
+
+    metrics['sopr'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/realised/sopr/sopr_light.html',
+        'coc_sopr')
+
+    metrics['sth_mvrv'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/unrealised/mvrv_momentum_sth/mvrv_momentum_sth_light.html',
+        'coc_sth_mvrv')
+
+    metrics['lth_mvrv'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/unrealised/mvrv_momentum_lth/mvrv_momentum_lth_light.html',
+        'coc_lth_mvrv')
+
+    metrics['nvt'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/pricing/pricing_nvtprice/pricing_nvtprice_light.html',
+        'coc_nvt')
+
+    metrics['net_pnl'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/realised/netrealisedpnl/netrealisedpnl_light.html',
+        'coc_net_pnl')
+
+    metrics['cycle_oscillators'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/confluence/confluence_cycleextremeoscillators_0/confluence_cycleextremeoscillators_0_light.html',
+        'coc_cycle_osc')
+
+    metrics['hodl_waves'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/supply/hodl_waves_1/hodl_waves_1_light.html',
+        'coc_hodl')
+
+    metrics['diff_issuance'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/mining/difficultyperissuance/difficultyperissuance_light.html',
+        'coc_diff_iss')
+
+    metrics['supply_lth_sth'] = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/supply/breakdown_lthsth_1/breakdown_lthsth_1_light.html',
+        'coc_supply_lthsth')
+
+    # Build summary
+    summary = {}
+    if metrics.get('mvrv') and metrics['mvrv'].get('latest'):
+        for k, v in metrics['mvrv']['latest'].items():
+            if 'mvrv' in k.lower() or 'ratio' in k.lower():
+                summary['mvrv_ratio'] = v
+                summary['mvrv_zone'] = 'OVERVALUED' if v > 3.5 else ('PREMIUM' if v > 2.0 else ('FAIR VALUE' if v > 1.0 else 'DISCOUNT'))
+                break
+
+    if metrics.get('puell') and metrics['puell'].get('latest'):
+        for k, v in metrics['puell']['latest'].items():
+            if 'puell' in k.lower():
+                summary['puell_multiple'] = v
+                summary['puell_zone'] = 'EXTREME PROFIT' if v > 4 else ('HIGH' if v > 1.5 else ('NORMAL' if v > 0.5 else 'CAPITULATION'))
+                break
+
+    if metrics.get('sopr') and metrics['sopr'].get('latest'):
+        for k, v in metrics['sopr']['latest'].items():
+            if 'sopr' in k.lower():
+                summary['sopr'] = v
+                summary['sopr_zone'] = 'PROFIT TAKING' if v > 1.05 else ('NEUTRAL' if v > 0.95 else 'LOSS SELLING')
+                break
+
+    available = {k: v is not None for k, v in metrics.items()}
+
+    result = {
+        'status': 'ok',
+        'metrics': {k: v for k, v in metrics.items() if v is not None},
+        'summary': summary,
+        'available': available,
+        'lastUpdate': datetime.date.today().isoformat(),
+    }
+    _cache[ck] = result
+    _cache_time[ck] = now
+    return jsonify(result)
+
+
+@app.route('/api/onchain/advanced/refresh')
+def api_onchain_advanced_refresh():
+    keys = [k for k in list(_cache.keys()) if k.startswith('coc_') or k == 'onchain_advanced_main']
+    for k in keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[ONCHAIN] Advanced cache cleared (' + str(len(keys)) + ' keys)')
+    return api_onchain_advanced()
+
+
+@app.route('/api/onchain/test-coc')
+def api_test_coc():
+    """Temporary: test if ocfinance works from Render."""
+    try:
+        import ocfinance as of
+        df = of.download('https://charts.checkonchain.com/btconchain/unrealised/mvrv_all/mvrv_all_light.html')
+        if df is not None:
+            return jsonify({
+                'ok': True,
+                'rows': len(df),
+                'columns': list(df.columns),
+                'last_date': str(df.index[-1])[:10] if len(df) > 0 else None,
+                'last_values': {col: round(float(df[col].dropna().iloc[-1]), 4) for col in df.columns if not df[col].dropna().empty},
+                'sample_dates': [str(d)[:10] for d in df.index[-5:]],
+            })
+        return jsonify({'ok': False, 'error': 'DataFrame is None'})
+    except Exception as e:
+        import traceback
+        return jsonify({'ok': False, 'error': str(e), 'traceback': traceback.format_exc()})
+
+
 # ─── EARNINGS INTELLIGENCE (PEAD) ───────────────────────────────────────────
 
 import time as _time
