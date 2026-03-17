@@ -2322,9 +2322,108 @@ def api_congressional_refresh():
     return api_congressional()
 
 
-# Debug endpoint removed — diagnostics complete.
-# Working source: disclosures-clerk.house.gov (House XML feed)
-# Non-working: GitHub repos (stale 2019 / 404), efdsearch.senate.gov (503)
+@app.route('/api/senate-test')
+def api_senate_test():
+    """Temporary diagnostic: test Senate data sources."""
+    import csv
+    import io
+    results = {}
+
+    # --- Test 1: jeremiak reports.json ---
+    r1 = {'url': 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/reports.json'}
+    try:
+        req = urllib.request.Request(r1['url'], headers={'User-Agent': 'Vilasio/3.7'})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read()
+            r1['status'] = resp.status
+            r1['size'] = len(raw)
+            r1['preview'] = raw[:500].decode('utf-8', errors='replace')
+        data = json.loads(raw.decode('utf-8'))
+        r1['type'] = type(data).__name__
+        if isinstance(data, list):
+            r1['count'] = len(data)
+            if data:
+                r1['first_keys'] = list(data[0].keys()) if isinstance(data[0], dict) else type(data[0]).__name__
+                r1['first_sample'] = str(data[0])[:300]
+                r1['last_sample'] = str(data[-1])[:300]
+                # Find date range
+                dates = [str(d.get('date', d.get('filed_date', d.get('report_date', '')))) for d in data if isinstance(d, dict)]
+                dates = [d for d in dates if d and len(d) >= 8]
+                if dates:
+                    r1['date_min'] = min(dates)
+                    r1['date_max'] = max(dates)
+        elif isinstance(data, dict):
+            r1['keys'] = list(data.keys())[:20]
+    except Exception as e:
+        r1['error'] = type(e).__name__ + ': ' + str(e)
+    results['reports_json'] = r1
+
+    # --- Test 2: transactions.csv ---
+    csv_urls = [
+        ('transactions.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/output/transactions.csv'),
+        ('transactions.json', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/output/transactions.json'),
+        ('reports.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/output/reports.csv'),
+        ('data/transactions.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/data/transactions.csv'),
+        ('data.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/data.csv'),
+    ]
+    for label, url in csv_urls:
+        r = {'url': url}
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+                r['status'] = resp.status
+                r['size'] = len(raw)
+                text = raw.decode('utf-8', errors='replace')
+                lines = text.split('\n')
+                r['total_lines'] = len(lines)
+                r['first_5_lines'] = lines[:5]
+                if label.endswith('.csv') and lines:
+                    try:
+                        reader = csv.DictReader(io.StringIO(text))
+                        r['columns'] = reader.fieldnames
+                        rows = list(reader)
+                        r['row_count'] = len(rows)
+                        if rows:
+                            r['first_row'] = dict(rows[0])
+                            r['last_row'] = dict(rows[-1])
+                    except Exception as ce:
+                        r['csv_parse_error'] = str(ce)
+                elif label.endswith('.json'):
+                    try:
+                        jdata = json.loads(text)
+                        r['type'] = type(jdata).__name__
+                        if isinstance(jdata, list):
+                            r['count'] = len(jdata)
+                            if jdata:
+                                r['first'] = str(jdata[0])[:300]
+                                r['last'] = str(jdata[-1])[:300]
+                    except:
+                        r['json_parse'] = 'FAILED'
+        except urllib.error.HTTPError as e:
+            r['error'] = 'HTTP ' + str(e.code)
+        except Exception as e:
+            r['error'] = type(e).__name__ + ': ' + str(e)
+        results[label] = r
+
+    # --- Test 3: sec.report ---
+    r3 = {'url': 'https://sec.report/Senate-Stock-Disclosures'}
+    try:
+        req = urllib.request.Request(r3['url'], headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode('utf-8', errors='replace')
+            r3['status'] = resp.status
+            r3['size'] = len(raw)
+            r3['has_table'] = '<table' in raw.lower()
+            r3['tr_count'] = raw.lower().count('<tr')
+            r3['preview'] = raw[:500]
+    except urllib.error.HTTPError as e:
+        r3['error'] = 'HTTP ' + str(e.code)
+    except Exception as e:
+        r3['error'] = type(e).__name__ + ': ' + str(e)
+    results['sec_report'] = r3
+
+    return jsonify(results)
 
 
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
