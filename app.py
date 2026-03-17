@@ -2358,53 +2358,58 @@ def api_senate_test():
         r1['error'] = type(e).__name__ + ': ' + str(e)
     results['reports_json'] = r1
 
-    # --- Test 2: transactions.csv ---
-    csv_urls = [
-        ('transactions.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/output/transactions.csv'),
-        ('transactions.json', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/output/transactions.json'),
-        ('reports.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/output/reports.csv'),
-        ('data/transactions.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/data/transactions.csv'),
-        ('data.csv', 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/data.csv'),
-    ]
-    for label, url in csv_urls:
-        r = {'url': url}
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.7'})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                raw = resp.read()
-                r['status'] = resp.status
-                r['size'] = len(raw)
-                text = raw.decode('utf-8', errors='replace')
-                lines = text.split('\n')
-                r['total_lines'] = len(lines)
-                r['first_5_lines'] = lines[:5]
-                if label.endswith('.csv') and lines:
-                    try:
-                        reader = csv.DictReader(io.StringIO(text))
-                        r['columns'] = reader.fieldnames
-                        rows = list(reader)
-                        r['row_count'] = len(rows)
-                        if rows:
-                            r['first_row'] = dict(rows[0])
-                            r['last_row'] = dict(rows[-1])
-                    except Exception as ce:
-                        r['csv_parse_error'] = str(ce)
-                elif label.endswith('.json'):
-                    try:
-                        jdata = json.loads(text)
-                        r['type'] = type(jdata).__name__
-                        if isinstance(jdata, list):
-                            r['count'] = len(jdata)
-                            if jdata:
-                                r['first'] = str(jdata[0])[:300]
-                                r['last'] = str(jdata[-1])[:300]
-                    except:
-                        r['json_parse'] = 'FAILED'
-        except urllib.error.HTTPError as e:
-            r['error'] = 'HTTP ' + str(e.code)
-        except Exception as e:
-            r['error'] = type(e).__name__ + ': ' + str(e)
-        results[label] = r
+    # --- Test 2: transactions.csv (deep date analysis) ---
+    r2 = {'url': 'https://raw.githubusercontent.com/jeremiak/us-senate-financial-disclosure-data/master/output/transactions.csv'}
+    try:
+        req = urllib.request.Request(r2['url'], headers={'User-Agent': 'Vilasio/3.7'})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read()
+            r2['status'] = resp.status
+            r2['size'] = len(raw)
+        text = raw.decode('utf-8', errors='replace')
+        reader = csv.DictReader(io.StringIO(text))
+        r2['columns'] = reader.fieldnames
+        rows = list(reader)
+        r2['row_count'] = len(rows)
+        if rows:
+            r2['first_row'] = dict(rows[0])
+            r2['last_row'] = dict(rows[-1])
+            # Date analysis
+            filed_dates = [r.get('filed-date', '') or r.get('date', '') for r in rows]
+            txn_dates = [r.get('transaction-date', '') for r in rows]
+            filed_clean = sorted([d for d in filed_dates if d and len(d) >= 8])
+            txn_clean = sorted([d for d in txn_dates if d and len(d) >= 8])
+            if filed_clean:
+                r2['date_range_filed'] = {'min': filed_clean[0], 'max': filed_clean[-1]}
+            if txn_clean:
+                r2['date_range_transaction'] = {'min': txn_clean[0], 'max': txn_clean[-1]}
+            # Count by year
+            year_count = {}
+            for d in filed_clean:
+                y = d[:4]
+                year_count[y] = year_count.get(y, 0) + 1
+            r2['dates_by_year'] = dict(sorted(year_count.items()))
+            # Recent 100 by filed-date
+            rows_with_date = [r for r in rows if (r.get('filed-date', '') or r.get('date', ''))]
+            rows_with_date.sort(key=lambda x: x.get('filed-date', '') or x.get('date', ''), reverse=True)
+            recent = []
+            for r in rows_with_date[:100]:
+                recent.append({
+                    'filer': r.get('filer', ''),
+                    'ticker': r.get('ticker', ''),
+                    'type': r.get('type', r.get('transaction-type', '')),
+                    'transaction_date': r.get('transaction-date', ''),
+                    'filed_date': r.get('filed-date', '') or r.get('date', ''),
+                    'amount': r.get('amount', r.get('amount-range', '')),
+                    'asset_name': r.get('asset-name', ''),
+                    'owner': r.get('owner', ''),
+                })
+            r2['recent_100'] = recent
+    except urllib.error.HTTPError as e:
+        r2['error'] = 'HTTP ' + str(e.code)
+    except Exception as e:
+        r2['error'] = type(e).__name__ + ': ' + str(e)
+    results['transactions_csv'] = r2
 
     # --- Test 3: sec.report ---
     r3 = {'url': 'https://sec.report/Senate-Stock-Disclosures'}
