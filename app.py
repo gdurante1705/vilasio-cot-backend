@@ -2336,6 +2336,37 @@ def api_congressional_refresh():
     print('[CONGRESS] Cache cleared (' + str(len(keys)) + ' keys)')
     return api_congressional()
 
+
+@app.route('/api/test-dns')
+def api_test_dns():
+    """Temporary diagnostic: test which domains are reachable from Render."""
+    urls = [
+        'https://efdsearch.senate.gov',
+        'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/README.md',
+        'https://disclosures-clerk.house.gov',
+        'https://www.quiverquant.com/congresstrading/',
+        'https://senatestockwatcher.com',
+        'https://housestockwatcher.com',
+        'https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json',
+        'https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json',
+    ]
+    results = []
+    for url in urls:
+        entry = {'url': url, 'status': None, 'error': None}
+        try:
+            req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Vilasio/3.7'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                entry['status'] = resp.status
+        except urllib.error.HTTPError as e:
+            entry['status'] = e.code
+            entry['error'] = str(e.reason)
+        except Exception as e:
+            entry['error'] = type(e).__name__ + ': ' + str(e)
+        results.append(entry)
+        print('[TEST-DNS] ' + url + ' -> status=' + str(entry['status']) + ' error=' + str(entry['error']))
+    return jsonify({'results': results})
+
+
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
 
 def fetch_yf_weekly(symbol, years=2):
