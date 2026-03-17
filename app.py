@@ -1761,20 +1761,94 @@ def api_onchain_clear_cache():
 
 @app.route('/api/onchain/test-coc')
 def api_test_coc():
-    """Temporary: test Plotly scraping from CheckOnChain on Render."""
-    result = fetch_checkonchain_metric(
-        'https://charts.checkonchain.com/btconchain/unrealised/mvrv_all/mvrv_all_light.html',
-        'test_coc_mvrv', ttl=300)
-    if result:
+    """Temporary: debug Plotly trace extraction from CheckOnChain."""
+    import re
+    url = 'https://charts.checkonchain.com/btconchain/unrealised/mvrv_all/mvrv_all_light.html'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            html = resp.read().decode('utf-8', errors='replace')
+
+        def extract_json_array(text, start_pos):
+            depth = 0
+            i = start_pos
+            while i < len(text):
+                c = text[i]
+                if c == '[':
+                    depth += 1
+                elif c == ']':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start_pos:i + 1])
+                        except json.JSONDecodeError:
+                            return None
+                elif c == '"':
+                    i += 1
+                    while i < len(text) and text[i] != '"':
+                        if text[i] == '\\':
+                            i += 1
+                        i += 1
+                i += 1
+            return None
+
+        data_arr = None
+        extraction_method = None
+
+        m = re.search(r'Plotly\.(?:newPlot|react)\(\s*["\'][^"\']+["\']\s*,\s*\[', html)
+        if m:
+            data_arr = extract_json_array(html, m.end() - 1)
+            extraction_method = 'Plotly.newPlot at pos ' + str(m.start())
+
+        if not data_arr:
+            m = re.search(r'"data"\s*:\s*\[', html)
+            if m:
+                data_arr = extract_json_array(html, m.end() - 1)
+                extraction_method = '"data":[] at pos ' + str(m.start())
+
+        if not data_arr:
+            extraction_method = 'no pattern matched'
+
+        if not data_arr:
+            return jsonify({'ok': False, 'error': extraction_method, 'html_size': len(html), 'html_snippet': html[:1000]})
+
+        trace_debug = []
+        for i, trace in enumerate(data_arr[:3]):
+            if not isinstance(trace, dict):
+                trace_debug.append({'index': i, 'type': str(type(trace))})
+                continue
+            y_raw = trace.get('y', [])
+            x_raw = trace.get('x', [])
+            trace_debug.append({
+                'index': i,
+                'keys': list(trace.keys()),
+                'name': trace.get('name', ''),
+                'y_type': str(type(y_raw)),
+                'y_len': len(y_raw) if isinstance(y_raw, list) else 'not_list',
+                'y_first5': y_raw[:5] if isinstance(y_raw, list) else str(y_raw)[:200],
+                'y_first5_types': [str(type(v).__name__) for v in (y_raw[:5] if isinstance(y_raw, list) else [])],
+                'x_len': len(x_raw) if isinstance(x_raw, list) else 'not_list',
+                'x_first3': x_raw[:3] if isinstance(x_raw, list) else str(x_raw)[:200],
+            })
+
+        # Also run the normal metric extraction to see what it produces
+        result = fetch_checkonchain_metric(url, 'test_coc_mvrv_debug', ttl=60)
+
         return jsonify({
             'ok': True,
-            'dates_count': len(result.get('dates', [])),
-            'series_names': list(result.get('series', {}).keys()),
-            'latest': result.get('latest', {}),
-            'first_5_dates': result.get('dates', [])[:5],
-            'last_5_dates': result.get('dates', [])[-5:],
+            'extraction_method': extraction_method,
+            'trace_count': len(data_arr),
+            'trace_debug': trace_debug,
+            'metric_result': {
+                'dates_count': len(result.get('dates', [])) if result else 0,
+                'series_names': list(result.get('series', {}).keys()) if result else [],
+                'latest': result.get('latest', {}) if result else {},
+                'series_sample': {k: {'len': len(v), 'nonNull': len([x for x in v if x is not None]), 'first5': v[:5], 'last5': v[-5:]} for k, v in (result.get('series', {}) if result else {}).items()},
+            } if result else None,
         })
-    return jsonify({'ok': False, 'error': 'Failed to extract Plotly data from HTML'})
+    except Exception as e:
+        import traceback
+        return jsonify({'ok': False, 'error': str(e), 'traceback': traceback.format_exc()})
 
 
 # ─── EARNINGS INTELLIGENCE (PEAD) ───────────────────────────────────────────
