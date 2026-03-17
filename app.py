@@ -2094,53 +2094,66 @@ def build_congressional_data():
         print('[CONGRESS] GitHub trades from cache: ' + str(len(congress_trades)))
     else:
         endpoints = [
-            ('Senate', 'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/main/data/all_transactions.json'),
-            ('House', 'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/main/data/all_transactions.json'),
+            ('Senate', [
+                'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/aggregate/all_transactions.json',
+            ]),
+            ('House', [
+                'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/data/all_transactions.json',
+                'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/aggregate/all_transactions.json',
+            ]),
         ]
-        for chamber, raw_url in endpoints:
-            try:
-                req = urllib.request.Request(raw_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                if not isinstance(data, list):
-                    print('[CONGRESS] ' + chamber + ' GitHub: unexpected response type=' + type(data).__name__)
-                    continue
-                count = 0
-                for item in data:
-                    transactions = item.get('transactions', [])
-                    if transactions and isinstance(transactions, list):
-                        for txn in transactions:
-                            trade_date = txn.get('transaction_date', item.get('date_recieved', ''))
+        for chamber, urls in endpoints:
+            fetched = False
+            for raw_url in urls:
+                try:
+                    req = urllib.request.Request(raw_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+                    if not isinstance(data, list):
+                        print('[CONGRESS] ' + chamber + ' GitHub: unexpected response from ' + raw_url)
+                        continue
+                    count = 0
+                    for item in data:
+                        # Aggregate format: flat object with senator/representative, ticker, type, amount, transaction_date
+                        # Daily format: nested with first_name, last_name, transactions[]
+                        transactions = item.get('transactions', [])
+                        if transactions and isinstance(transactions, list):
+                            for txn in transactions:
+                                trade_date = txn.get('transaction_date', item.get('date_recieved', ''))
+                                if trade_date >= from_30:
+                                    congress_trades.append({
+                                        'date': trade_date,
+                                        'name': (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip(),
+                                        'party': '',
+                                        'chamber': chamber,
+                                        'symbol': txn.get('ticker', ''),
+                                        'transaction': txn.get('type', ''),
+                                        'amount': txn.get('amount', ''),
+                                        'asset': txn.get('asset_description', ''),
+                                    })
+                                    count += 1
+                        else:
+                            trade_date = item.get('transaction_date', item.get('date_recieved', ''))
                             if trade_date >= from_30:
+                                name = item.get('senator', '') or item.get('representative', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
                                 congress_trades.append({
                                     'date': trade_date,
-                                    'name': (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip(),
+                                    'name': name,
                                     'party': '',
                                     'chamber': chamber,
-                                    'symbol': txn.get('ticker', ''),
-                                    'transaction': txn.get('type', ''),
-                                    'amount': txn.get('amount', ''),
-                                    'asset': txn.get('asset_description', ''),
+                                    'symbol': item.get('ticker', ''),
+                                    'transaction': item.get('type', item.get('transaction_type', '')),
+                                    'amount': item.get('amount', ''),
+                                    'asset': item.get('asset_description', ''),
                                 })
                                 count += 1
-                    else:
-                        trade_date = item.get('transaction_date', item.get('date_recieved', ''))
-                        if trade_date >= from_30:
-                            name = item.get('representative', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
-                            congress_trades.append({
-                                'date': trade_date,
-                                'name': name,
-                                'party': '',
-                                'chamber': chamber,
-                                'symbol': item.get('ticker', ''),
-                                'transaction': item.get('type', item.get('transaction_type', '')),
-                                'amount': item.get('amount', ''),
-                                'asset': item.get('asset_description', ''),
-                            })
-                            count += 1
-                print('[CONGRESS] ' + chamber + ' GitHub: ' + str(count) + ' trades (last 30 days)')
-            except Exception as e:
-                print('[CONGRESS] ' + chamber + ' GitHub error: ' + str(e))
+                    print('[CONGRESS] ' + chamber + ' GitHub: ' + str(count) + ' trades (last 30 days) from ' + raw_url)
+                    fetched = True
+                    break
+                except Exception as e:
+                    print('[CONGRESS] ' + chamber + ' GitHub error (' + raw_url + '): ' + str(e))
+            if not fetched:
+                print('[CONGRESS] ' + chamber + ': all URLs failed')
         congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
         _cache[ck_ct] = congress_trades
         _cache_time[ck_ct] = now
