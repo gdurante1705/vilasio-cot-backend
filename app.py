@@ -1524,36 +1524,91 @@ def api_onchain_refresh():
     return api_onchain()
 
 
-# ─── ON-CHAIN ADVANCED (CheckOnChain via ocfinance) ─────────────────────────
+# ─── ON-CHAIN ADVANCED (CheckOnChain via direct Plotly scraping) ─────────────
 
 def fetch_checkonchain_metric(url, cache_key, ttl=43200):
-    """Fetch on-chain metric from CheckOnChain via ocfinance. Cache 12h."""
+    """Fetch on-chain metric by scraping Plotly data from CheckOnChain HTML chart. Cache 12h."""
     now = datetime.datetime.now()
     if cache_key in _cache and (now - _cache_time.get(cache_key, now)).total_seconds() < ttl:
         return _cache[cache_key]
     try:
-        import ocfinance as of
-        import pandas as pd
-        df = of.download(url)
-        if df is not None and not df.empty:
-            result = {
-                'dates': [str(d)[:10] for d in df.index],
-                'series': {},
-            }
-            for col in df.columns:
-                result['series'][col] = [None if pd.isna(v) else round(float(v), 4) for v in df[col]]
-            result['latest'] = {}
-            for col in df.columns:
-                vals = df[col].dropna()
-                if len(vals) > 0:
-                    result['latest'][col] = round(float(vals.iloc[-1]), 4)
-            _cache[cache_key] = result
-            _cache_time[cache_key] = now
-            print('[ONCHAIN] CheckOnChain ' + cache_key + ': ' + str(len(df)) + ' rows, ' + str(len(df.columns)) + ' cols')
-            return result
+        import re
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            html = resp.read().decode('utf-8', errors='replace')
+
+        # Plotly HTML exports embed chart data as JSON.
+        # Strategy: find the JSON data array from Plotly.newPlot/react calls or embedded blobs.
+        match_str = None
+
+        # Pattern 1: Plotly.newPlot("id", [traces], layout)
+        m = re.search(r'Plotly\.(?:newPlot|react)\(\s*["\'][^"\']+["\']\s*,\s*(\[.*?\])\s*,\s*\{', html, re.DOTALL)
+        if m:
+            match_str = m.group(1)
+
+        # Pattern 2: "data": [{...}] inside a larger JSON object
+        if not match_str:
+            m = re.search(r'"data"\s*:\s*(\[\s*\{.*?\}\s*\])', html, re.DOTALL)
+            if m:
+                match_str = m.group(1)
+
+        # Pattern 3: largest JSON array block in the file
+        if not match_str:
+            blocks = re.findall(r'(\[\s*\{\s*"[^"]*"\s*:.*?\}\s*\])', html, re.DOTALL)
+            if blocks:
+                match_str = max(blocks, key=len)
+
+        if not match_str:
+            print('[ONCHAIN] ' + cache_key + ': no Plotly data found in HTML (' + str(len(html)) + ' bytes)')
+            return None
+
+        data_arr = json.loads(match_str)
+        if not isinstance(data_arr, list) or not data_arr:
+            print('[ONCHAIN] ' + cache_key + ': parsed data is not a non-empty list')
+            return None
+
+        dates = None
+        series = {}
+        latest = {}
+
+        for trace in data_arr:
+            if not isinstance(trace, dict):
+                continue
+            name = trace.get('name', 'trace_' + str(len(series)))
+            x = trace.get('x', [])
+            y = trace.get('y', [])
+            if not x or not y:
+                continue
+            if dates is None:
+                dates = [str(d)[:10] for d in x]
+            clean_y = []
+            for v in y:
+                try:
+                    clean_y.append(round(float(v), 6) if v is not None else None)
+                except (ValueError, TypeError):
+                    clean_y.append(None)
+            series[name] = clean_y
+            non_none = [v for v in clean_y if v is not None]
+            if non_none:
+                latest[name] = non_none[-1]
+
+        if not dates or not series:
+            print('[ONCHAIN] ' + cache_key + ': no valid traces extracted')
+            return None
+
+        result = {'dates': dates, 'series': series, 'latest': latest}
+        _cache[cache_key] = result
+        _cache_time[cache_key] = now
+        print('[ONCHAIN] CheckOnChain ' + cache_key + ': ' + str(len(dates)) + ' dates, ' + str(len(series)) + ' series: ' + str(list(series.keys())))
+        return result
+
     except Exception as e:
+        import traceback
         print('[ONCHAIN] CheckOnChain ' + cache_key + ' error: ' + str(e))
-    return None
+        traceback.print_exc()
+        return None
 
 
 @app.route('/api/onchain/advanced')
@@ -1662,23 +1717,20 @@ def api_onchain_advanced_refresh():
 
 @app.route('/api/onchain/test-coc')
 def api_test_coc():
-    """Temporary: test if ocfinance works from Render."""
-    try:
-        import ocfinance as of
-        df = of.download('https://charts.checkonchain.com/btconchain/unrealised/mvrv_all/mvrv_all_light.html')
-        if df is not None:
-            return jsonify({
-                'ok': True,
-                'rows': len(df),
-                'columns': list(df.columns),
-                'last_date': str(df.index[-1])[:10] if len(df) > 0 else None,
-                'last_values': {col: round(float(df[col].dropna().iloc[-1]), 4) for col in df.columns if not df[col].dropna().empty},
-                'sample_dates': [str(d)[:10] for d in df.index[-5:]],
-            })
-        return jsonify({'ok': False, 'error': 'DataFrame is None'})
-    except Exception as e:
-        import traceback
-        return jsonify({'ok': False, 'error': str(e), 'traceback': traceback.format_exc()})
+    """Temporary: test Plotly scraping from CheckOnChain on Render."""
+    result = fetch_checkonchain_metric(
+        'https://charts.checkonchain.com/btconchain/unrealised/mvrv_all/mvrv_all_light.html',
+        'test_coc_mvrv', ttl=300)
+    if result:
+        return jsonify({
+            'ok': True,
+            'dates_count': len(result.get('dates', [])),
+            'series_names': list(result.get('series', {}).keys()),
+            'latest': result.get('latest', {}),
+            'first_5_dates': result.get('dates', [])[:5],
+            'last_5_dates': result.get('dates', [])[-5:],
+        })
+    return jsonify({'ok': False, 'error': 'Failed to extract Plotly data from HTML'})
 
 
 # ─── EARNINGS INTELLIGENCE (PEAD) ───────────────────────────────────────────

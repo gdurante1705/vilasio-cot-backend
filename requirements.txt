@@ -3,4 +3,3 @@ gunicorn==21.2.0
 yfinance
 finvizfinance
 beautifulsoup4
-ocfinance
