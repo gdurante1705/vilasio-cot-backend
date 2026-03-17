@@ -2084,80 +2084,252 @@ def build_congressional_data():
     from_30 = (today - datetime.timedelta(days=30)).isoformat()
     now = datetime.datetime.now()
 
-    # --- Congressional trades from GitHub raw JSON (timothycarambat repos) ---
-    print('[CONGRESS] Fetching congressional trades (GitHub raw JSON)...')
-    CONGRESS_CACHE_TTL = 43200  # 12 hours
-    ck_ct = 'congress_github_trades'
+    # --- Congressional trades: multi-source with fallback ---
+    print('[CONGRESS] Fetching congressional trades...')
+    CONGRESS_CACHE_TTL = 21600  # 6 hours
+    ck_ct = 'congress_trades_v3'
     congress_trades = []
+    congress_sources = []
+    from_90 = (today - datetime.timedelta(days=90)).isoformat()
     if ck_ct in _cache and (now - _cache_time.get(ck_ct, now)).total_seconds() < CONGRESS_CACHE_TTL:
         congress_trades = _cache[ck_ct]
-        print('[CONGRESS] GitHub trades from cache: ' + str(len(congress_trades)))
+        congress_sources = _cache.get(ck_ct + '_src', [])
+        print('[CONGRESS] Trades from cache: ' + str(len(congress_trades)))
     else:
-        endpoints = [
-            ('Senate', [
-                'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/aggregate/all_transactions.json',
-            ]),
-            ('House', [
-                'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/data/all_transactions.json',
-                'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/aggregate/all_transactions.json',
-            ]),
+        # --- Source 1: GitHub raw (Senate) ---
+        senate_ok = False
+        github_urls = [
+            'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/aggregate/all_transactions.json',
         ]
-        for chamber, urls in endpoints:
-            fetched = False
-            for raw_url in urls:
-                try:
-                    req = urllib.request.Request(raw_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
-                    with urllib.request.urlopen(req, timeout=60) as resp:
-                        data = json.loads(resp.read().decode('utf-8'))
-                    if not isinstance(data, list):
-                        print('[CONGRESS] ' + chamber + ' GitHub: unexpected response from ' + raw_url)
-                        continue
-                    count = 0
-                    for item in data:
-                        # Aggregate format: flat object with senator/representative, ticker, type, amount, transaction_date
-                        # Daily format: nested with first_name, last_name, transactions[]
-                        transactions = item.get('transactions', [])
-                        if transactions and isinstance(transactions, list):
-                            for txn in transactions:
-                                trade_date = txn.get('transaction_date', item.get('date_recieved', ''))
-                                if trade_date >= from_30:
+        for raw_url in github_urls:
+            try:
+                print('[CONGRESS] Trying GitHub Senate: ' + raw_url)
+                req = urllib.request.Request(raw_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                if not isinstance(data, list):
+                    print('[CONGRESS] GitHub Senate: unexpected type ' + type(data).__name__)
+                    continue
+                count = 0
+                for item in data:
+                    transactions = item.get('transactions', [])
+                    if transactions and isinstance(transactions, list):
+                        for txn in transactions:
+                            td = txn.get('transaction_date', item.get('date_recieved', ''))
+                            if td and td >= from_30:
+                                sym = txn.get('ticker', '')
+                                if sym and sym != '--' and sym != 'N/A':
                                     congress_trades.append({
-                                        'date': trade_date,
+                                        'date': td,
                                         'name': (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip(),
                                         'party': '',
-                                        'chamber': chamber,
-                                        'symbol': txn.get('ticker', ''),
+                                        'chamber': 'Senate',
+                                        'symbol': sym,
                                         'transaction': txn.get('type', ''),
                                         'amount': txn.get('amount', ''),
                                         'asset': txn.get('asset_description', ''),
+                                        'disclosure_date': item.get('date_recieved', ''),
                                     })
                                     count += 1
-                        else:
-                            trade_date = item.get('transaction_date', item.get('date_recieved', ''))
-                            if trade_date >= from_30:
-                                name = item.get('senator', '') or item.get('representative', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
+                    else:
+                        td = item.get('transaction_date', item.get('date_recieved', ''))
+                        if td and td >= from_30:
+                            sym = item.get('ticker', '')
+                            if sym and sym != '--' and sym != 'N/A':
+                                name = item.get('senator', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
                                 congress_trades.append({
-                                    'date': trade_date,
+                                    'date': td,
                                     'name': name,
                                     'party': '',
-                                    'chamber': chamber,
-                                    'symbol': item.get('ticker', ''),
-                                    'transaction': item.get('type', item.get('transaction_type', '')),
+                                    'chamber': 'Senate',
+                                    'symbol': sym,
+                                    'transaction': item.get('type', ''),
                                     'amount': item.get('amount', ''),
                                     'asset': item.get('asset_description', ''),
+                                    'disclosure_date': item.get('disclosure_date', ''),
                                 })
                                 count += 1
-                    print('[CONGRESS] ' + chamber + ' GitHub: ' + str(count) + ' trades (last 30 days) from ' + raw_url)
-                    fetched = True
-                    break
-                except Exception as e:
-                    print('[CONGRESS] ' + chamber + ' GitHub error (' + raw_url + '): ' + str(e))
-            if not fetched:
-                print('[CONGRESS] ' + chamber + ': all URLs failed')
+                print('[CONGRESS] GitHub Senate: ' + str(count) + ' trades (last 30 days)')
+                if count > 0:
+                    senate_ok = True
+                    congress_sources.append('GitHub (senate-stock-watcher-data)')
+                break
+            except Exception as e:
+                print('[CONGRESS] GitHub Senate error: ' + str(e))
+
+        # --- Source 1b: efdsearch.senate.gov fallback for Senate ---
+        if not senate_ok:
+            try:
+                print('[CONGRESS] Trying efdsearch.senate.gov...')
+                from_date = (today - datetime.timedelta(days=30)).strftime('%m/%d/%Y')
+                to_date = today.strftime('%m/%d/%Y')
+                search_url = 'https://efdsearch.senate.gov/search/home/'
+                req0 = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req0, timeout=15) as resp0:
+                    home_html = resp0.read().decode('utf-8')
+                    cookies = resp0.headers.get_all('Set-Cookie') or []
+                cookie_str = '; '.join(c.split(';')[0] for c in cookies)
+                import re as _re
+                csrf_match = _re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', home_html)
+                if csrf_match:
+                    csrf = csrf_match.group(1)
+                    post_data = urllib.parse.urlencode({
+                        'csrfmiddlewaretoken': csrf,
+                        'report_type': '11',
+                        'filer_type': '1',
+                        'submitted_start_date': from_date,
+                        'submitted_end_date': to_date,
+                    }).encode('utf-8')
+                    search_api = 'https://efdsearch.senate.gov/search/report/data/'
+                    req1 = urllib.request.Request(search_api, data=post_data, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Referer': search_url,
+                        'Cookie': cookie_str,
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    })
+                    with urllib.request.urlopen(req1, timeout=20) as resp1:
+                        result_data = json.loads(resp1.read().decode('utf-8'))
+                    records = result_data.get('data', result_data) if isinstance(result_data, dict) else result_data
+                    if isinstance(records, list):
+                        count = 0
+                        from html.parser import HTMLParser
+                        class TagStripper(HTMLParser):
+                            def __init__(self):
+                                super().__init__()
+                                self.text = ''
+                            def handle_data(self, d):
+                                self.text += d
+                        def strip_tags(h):
+                            s = TagStripper()
+                            s.feed(str(h))
+                            return s.text.strip()
+                        for row in records:
+                            if isinstance(row, list) and len(row) >= 4:
+                                name = strip_tags(row[0]) + ' ' + strip_tags(row[1])
+                                link = str(row[3]) if len(row) > 3 else ''
+                                date_str = strip_tags(row[4]) if len(row) > 4 else ''
+                                congress_trades.append({
+                                    'date': date_str,
+                                    'name': name.strip(),
+                                    'party': '',
+                                    'chamber': 'Senate',
+                                    'symbol': '',
+                                    'transaction': 'Filing',
+                                    'amount': '',
+                                    'asset': strip_tags(row[3]) if len(row) > 3 else '',
+                                    'disclosure_date': date_str,
+                                })
+                                count += 1
+                        print('[CONGRESS] eFD Senate: ' + str(count) + ' filings')
+                        if count > 0:
+                            congress_sources.append('efdsearch.senate.gov')
+                else:
+                    print('[CONGRESS] eFD Senate: no data array in response')
+            except Exception as e:
+                print('[CONGRESS] eFD Senate error: ' + str(e))
+
+        # --- Source 2: GitHub raw (House) ---
+        house_ok = False
+        house_urls = [
+            'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/data/all_transactions.json',
+            'https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/aggregate/all_transactions.json',
+        ]
+        for raw_url in house_urls:
+            try:
+                print('[CONGRESS] Trying GitHub House: ' + raw_url)
+                req = urllib.request.Request(raw_url, headers={'User-Agent': 'Vilasio/3.7', 'Accept': 'application/json'})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                if not isinstance(data, list):
+                    continue
+                count = 0
+                for item in data:
+                    transactions = item.get('transactions', [])
+                    if transactions and isinstance(transactions, list):
+                        for txn in transactions:
+                            td = txn.get('transaction_date', item.get('date_recieved', ''))
+                            if td and td >= from_30:
+                                sym = txn.get('ticker', '')
+                                if sym and sym != '--' and sym != 'N/A':
+                                    congress_trades.append({
+                                        'date': td,
+                                        'name': (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip(),
+                                        'party': '',
+                                        'chamber': 'House',
+                                        'symbol': sym,
+                                        'transaction': txn.get('type', ''),
+                                        'amount': txn.get('amount', ''),
+                                        'asset': txn.get('asset_description', ''),
+                                        'disclosure_date': item.get('date_recieved', ''),
+                                    })
+                                    count += 1
+                    else:
+                        td = item.get('transaction_date', item.get('date_recieved', ''))
+                        if td and td >= from_30:
+                            sym = item.get('ticker', '')
+                            if sym and sym != '--' and sym != 'N/A':
+                                name = item.get('representative', '') or (item.get('first_name', '') + ' ' + item.get('last_name', '')).strip()
+                                congress_trades.append({
+                                    'date': td,
+                                    'name': name,
+                                    'party': '',
+                                    'chamber': 'House',
+                                    'symbol': sym,
+                                    'transaction': item.get('type', ''),
+                                    'amount': item.get('amount', ''),
+                                    'asset': item.get('asset_description', ''),
+                                    'disclosure_date': item.get('disclosure_date', ''),
+                                })
+                                count += 1
+                print('[CONGRESS] GitHub House: ' + str(count) + ' trades (last 30 days)')
+                if count > 0:
+                    house_ok = True
+                    congress_sources.append('GitHub (house-stock-watcher-data)')
+                break
+            except Exception as e:
+                print('[CONGRESS] GitHub House error: ' + str(e))
+
+        # --- Source 2b: disclosures-clerk.house.gov fallback ---
+        if not house_ok:
+            try:
+                print('[CONGRESS] Trying disclosures-clerk.house.gov...')
+                year = today.year
+                fd_url = 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/' + str(year) + '/'
+                req = urllib.request.Request(fd_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    html_body = resp.read().decode('utf-8', errors='replace')
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html_body, 'html.parser')
+                rows = soup.select('table tr')
+                count = 0
+                for row in rows[1:]:
+                    cols = row.find_all('td')
+                    if len(cols) >= 5:
+                        name = cols[0].get_text(strip=True)
+                        filing_date = cols[4].get_text(strip=True) if len(cols) > 4 else ''
+                        congress_trades.append({
+                            'date': filing_date,
+                            'name': name,
+                            'party': '',
+                            'chamber': 'House',
+                            'symbol': '',
+                            'transaction': 'Filing',
+                            'amount': '',
+                            'asset': cols[2].get_text(strip=True) if len(cols) > 2 else '',
+                            'disclosure_date': filing_date,
+                        })
+                        count += 1
+                print('[CONGRESS] House Clerk: ' + str(count) + ' filings')
+                if count > 0:
+                    congress_sources.append('disclosures-clerk.house.gov')
+            except Exception as e:
+                print('[CONGRESS] House Clerk error: ' + str(e))
+
         congress_trades.sort(key=lambda x: x.get('date', ''), reverse=True)
         _cache[ck_ct] = congress_trades
+        _cache[ck_ct + '_src'] = congress_sources
         _cache_time[ck_ct] = now
-    print('[CONGRESS] Congressional trades: ' + str(len(congress_trades)))
+    print('[CONGRESS] Congressional trades total: ' + str(len(congress_trades)) + ' sources: ' + str(congress_sources))
 
     # --- Insider trades from Finviz ---
     print('[CONGRESS] Fetching insider trades (Finviz)...')
@@ -2229,19 +2401,29 @@ def build_congressional_data():
         _cache[ck_tw] = insider_top_week
         _cache_time[ck_tw] = now
 
-    # --- Stats ---
+    # --- Congressional stats ---
     c_buys = len([t for t in congress_trades if 'Purchase' in t.get('transaction', '') or 'Buy' in t.get('transaction', '')])
     c_sells = len([t for t in congress_trades if 'Sale' in t.get('transaction', '')])
     net = 'bullish' if c_buys > c_sells else ('bearish' if c_sells > c_buys else 'neutral')
 
-    # Top sector from congressional buys
-    sector_count = {}
+    # Top tickers by trade count
+    ticker_count = {}
+    politician_count = {}
+    unique_tickers = set()
+    unique_politicians = set()
     for t in congress_trades:
-        if 'Purchase' in t.get('transaction', '') or 'Buy' in t.get('transaction', ''):
-            sym = t.get('symbol', '')
-            if sym:
-                sector_count[sym] = sector_count.get(sym, 0) + 1
-    top_sector_sym = max(sector_count, key=sector_count.get) if sector_count else ''
+        sym = t.get('symbol', '')
+        name = t.get('name', '')
+        txn = t.get('transaction', '')
+        if sym:
+            unique_tickers.add(sym)
+            ticker_count[sym] = ticker_count.get(sym, 0) + 1
+        if name:
+            unique_politicians.add(name)
+            politician_count[name] = politician_count.get(name, 0) + 1
+    top_tickers = sorted(ticker_count.items(), key=lambda x: x[1], reverse=True)[:10]
+    top_politicians = sorted(politician_count.items(), key=lambda x: x[1], reverse=True)[:10]
+    top_sector_sym = top_tickers[0][0] if top_tickers else ''
 
     # Biggest insider buy
     biggest = {'ticker': '', 'value': '', 'owner': ''}
@@ -2281,7 +2463,6 @@ def build_congressional_data():
         common = pead_syms & insider_buy_syms
         for sym in common:
             overlap.append({'symbol': sym, 'sources': []})
-            # Check which sources
             if any(ins.get('ticker') == sym for ins in insider_latest + insider_top_week if 'Buy' in ins.get('transaction', '') or 'Purchase' in ins.get('transaction', '')):
                 overlap[-1]['sources'].append('insider')
             if any(t.get('symbol') == sym for t in congress_trades if 'Purchase' in t.get('transaction', '') or 'Buy' in t.get('transaction', '')):
@@ -2299,8 +2480,24 @@ def build_congressional_data():
         'totalTrades': len(congress_trades),
     }
 
+    congressional_trades_block = {
+        'trades': congress_trades[:200],
+        'stats': {
+            'total_trades': len(congress_trades),
+            'purchases': c_buys,
+            'sales': c_sells,
+            'unique_tickers': len(unique_tickers),
+            'unique_politicians': len(unique_politicians),
+        },
+        'top_tickers': [{'ticker': t[0], 'count': t[1]} for t in top_tickers],
+        'top_politicians': [{'name': p[0], 'trades': p[1]} for p in top_politicians],
+        'sources': congress_sources,
+        'last_updated': now.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
     return {
         'congressTrades': congress_trades[:100],
+        'congressional_trades': congressional_trades_block,
         'insiderLatest': insider_latest[:50],
         'insiderTopWeek': insider_top_week[:50],
         'smartMoneyOverlap': overlap,
@@ -2313,7 +2510,7 @@ def api_congressional():
     try:
         ck = 'congressional_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 43200:  # 12h cache
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 21600:  # 6h cache
             return jsonify(_cache[ck])
         data = build_congressional_data()
         result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
@@ -2335,36 +2532,6 @@ def api_congressional_refresh():
         _cache_time.pop(k, None)
     print('[CONGRESS] Cache cleared (' + str(len(keys)) + ' keys)')
     return api_congressional()
-
-
-@app.route('/api/test-dns')
-def api_test_dns():
-    """Temporary diagnostic: test which domains are reachable from Render."""
-    urls = [
-        'https://efdsearch.senate.gov',
-        'https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/README.md',
-        'https://disclosures-clerk.house.gov',
-        'https://www.quiverquant.com/congresstrading/',
-        'https://senatestockwatcher.com',
-        'https://housestockwatcher.com',
-        'https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json',
-        'https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json',
-    ]
-    results = []
-    for url in urls:
-        entry = {'url': url, 'status': None, 'error': None}
-        try:
-            req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Vilasio/3.7'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                entry['status'] = resp.status
-        except urllib.error.HTTPError as e:
-            entry['status'] = e.code
-            entry['error'] = str(e.reason)
-        except Exception as e:
-            entry['error'] = type(e).__name__ + ': ' + str(e)
-        results.append(entry)
-        print('[TEST-DNS] ' + url + ' -> status=' + str(entry['status']) + ' error=' + str(entry['error']))
-    return jsonify({'results': results})
 
 
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
