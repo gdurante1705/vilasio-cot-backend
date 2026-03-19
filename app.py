@@ -3321,6 +3321,174 @@ def api_crossmarket_refresh():
     print('[CROSSMARKET] Cache cleared (' + str(len(cm_keys)) + ' keys), refetching...')
     return api_crossmarket()
 
+# ─── GEOPOLITICAL RISK INDEX ──────────────────────────────────────────────────
+
+_GPR_COUNTRY_MAP = {
+    'TURKEY': {'code': 'TR', 'name': 'Turkey'},
+    'MEXICO': {'code': 'MX', 'name': 'Mexico'},
+    'KOREA': {'code': 'KR', 'name': 'South Korea'},
+    'RUSSIA': {'code': 'RU', 'name': 'Russia'},
+    'INDIA': {'code': 'IN', 'name': 'India'},
+    'BRAZIL': {'code': 'BR', 'name': 'Brazil'},
+    'CHINA': {'code': 'CN', 'name': 'China'},
+    'INDONESIA': {'code': 'ID', 'name': 'Indonesia'},
+    'SAUDI_ARABIA': {'code': 'SA', 'name': 'Saudi Arabia'},
+    'SOUTH_AFRICA': {'code': 'ZA', 'name': 'South Africa'},
+    'ARGENTINA': {'code': 'AR', 'name': 'Argentina'},
+    'COLOMBIA': {'code': 'CO', 'name': 'Colombia'},
+    'VENEZUELA': {'code': 'VE', 'name': 'Venezuela'},
+    'THAILAND': {'code': 'TH', 'name': 'Thailand'},
+    'UKRAINE': {'code': 'UA', 'name': 'Ukraine'},
+    'ISRAEL': {'code': 'IL', 'name': 'Israel'},
+    'MALAYSIA': {'code': 'MY', 'name': 'Malaysia'},
+    'PHILIPPINES': {'code': 'PH', 'name': 'Philippines'},
+    'HONG_KONG': {'code': 'HK', 'name': 'Hong Kong'},
+}
+
+def build_geopolitical_data():
+    """Download GPR xlsx and parse global + country data."""
+    import io
+    try:
+        import openpyxl
+    except ImportError:
+        print('[GPR] openpyxl not installed')
+        return None
+
+    url = 'https://www.matteoiacoviello.com/gpr_files/gpr_web_latest.xlsx'
+    print('[GPR] Downloading GPR xlsx...')
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        raw = urllib.request.urlopen(req, timeout=30).read()
+    except Exception as e:
+        print('[GPR] Download failed: ' + str(e))
+        return None
+
+    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)
+
+    # --- Global GPR ---
+    ws = wb['GPR']
+    dates = []
+    gpr_vals = []
+    gpt_vals = []
+    gpa_vals = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        dt = row[0]
+        if not dt:
+            continue
+        if hasattr(dt, 'strftime'):
+            d_str = dt.strftime('%Y-%m')
+        else:
+            d_str = str(dt)[:7]
+        gpr_v = row[1]
+        gpt_v = row[2]
+        gpa_v = row[3]
+        if gpr_v is None:
+            continue
+        dates.append(d_str)
+        gpr_vals.append(round(float(gpr_v), 2))
+        gpt_vals.append(round(float(gpt_v), 2) if gpt_v is not None else None)
+        gpa_vals.append(round(float(gpa_v), 2) if gpa_v is not None else None)
+
+    # --- Country GPR ---
+    ws_c = wb['GPR_COUNTRIES']
+    headers = list(next(ws_c.iter_rows(min_row=1, max_row=1, values_only=True)))
+    country_cols = {}
+    for i, h in enumerate(headers):
+        if h and h.startswith('GPR_'):
+            key = h[4:]
+            if key in _GPR_COUNTRY_MAP:
+                country_cols[i] = key
+
+    country_series = {k: [] for k in country_cols.values()}
+    country_dates = []
+    for row in ws_c.iter_rows(min_row=2, values_only=True):
+        dt = row[0]
+        if not dt:
+            continue
+        if hasattr(dt, 'strftime'):
+            d_str = dt.strftime('%Y-%m')
+        else:
+            d_str = str(dt)[:7]
+        country_dates.append(d_str)
+        for col_idx, key in country_cols.items():
+            v = row[col_idx] if col_idx < len(row) else None
+            country_series[key].append(round(float(v), 2) if v is not None else None)
+
+    wb.close()
+
+    # Build country summaries
+    countries = {}
+    for key, info in _GPR_COUNTRY_MAP.items():
+        vals = country_series.get(key, [])
+        if not vals:
+            continue
+        latest = None
+        prev = None
+        for v in reversed(vals):
+            if v is not None:
+                if latest is None:
+                    latest = v
+                elif prev is None:
+                    prev = v
+                    break
+        change = round(latest - prev, 2) if latest is not None and prev is not None else None
+        countries[info['code']] = {
+            'name': info['name'],
+            'latest': latest,
+            'change': change,
+        }
+
+    # Top risks
+    top_risks = sorted(
+        [{'code': k, 'name': v['name'], 'gpr': v['latest'], 'change': v['change']}
+         for k, v in countries.items() if v['latest'] is not None],
+        key=lambda x: x['gpr'], reverse=True
+    )[:10]
+
+    print('[GPR] Parsed: ' + str(len(dates)) + ' months, ' + str(len(countries)) + ' countries')
+    return {
+        'gpr': {
+            'dates': dates,
+            'gpr': gpr_vals,
+            'gpt': gpt_vals,
+            'gpa': gpa_vals,
+        },
+        'countries': countries,
+        'topRisks': top_risks,
+    }
+
+
+@app.route('/api/geopolitical')
+def api_geopolitical():
+    try:
+        ck = 'geopolitical_main'
+        now = datetime.datetime.now()
+        if ck in _cache and (now - _cache_time.get(ck, now)).total_seconds() < 86400:
+            return jsonify(_cache[ck])
+        data = build_geopolitical_data()
+        if data is None:
+            return jsonify({'status': 'error', 'message': 'Failed to fetch GPR data'}), 500
+        result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
+        result.update(data)
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return jsonify(result)
+    except Exception as e:
+        print('[GPR] ' + str(e))
+        import traceback; traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/geopolitical/refresh')
+def api_geopolitical_refresh():
+    keys = [k for k in _cache if k.startswith('geopolitical_')]
+    for k in keys:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+    print('[GPR] Cache cleared')
+    return api_geopolitical()
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
