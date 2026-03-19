@@ -3444,11 +3444,11 @@ def build_geopolitical_data():
                     'spillover': round(spill_v, 2),
                 }
 
-            # Sort by latest GPR and take top 50
-            ranked = sorted(country_data.items(), key=lambda x: x[1]['latest'], reverse=True)[:50]
-            top50_names = set(n for n, _ in ranked)
+            # Top 50 by score for series data
+            ranked = sorted(country_data.items(), key=lambda x: x[1]['latest'], reverse=True)
+            top50_names = set(n for n, _ in ranked[:50])
 
-            # Build 10-year monthly series for top 50
+            # Build 10-year monthly series for top 50 only
             ten_yr_cutoff = (datetime.date.today() - datetime.timedelta(days=3650)).isoformat()[:7]
             country_series = {}
             for name in top50_names:
@@ -3467,19 +3467,21 @@ def build_geopolitical_data():
                     country_series[name]['dates'].append(d)
                     country_series[name]['values'].append(fv)
 
+            # Include ALL countries (not just top 50), series only for top 50
             countries = {}
             for name, d in ranked:
                 change = round(d['latest'] - d['prev'], 2)
-                cs = country_series.get(name, {'dates': [], 'values': []})
-                countries[name] = {
+                entry = {
                     'name': name,
                     'latest': d['latest'],
                     'change': change,
                     'initiator': d['initiator'],
                     'respondent': d['respondent'],
                     'spillover': d['spillover'],
-                    'series': cs,
                 }
+                if name in top50_names:
+                    entry['series'] = country_series.get(name, {'dates': [], 'values': []})
+                countries[name] = entry
 
             top_risks = sorted(
                 [{'name': k, 'gpr': v['latest'], 'change': v['change']}
