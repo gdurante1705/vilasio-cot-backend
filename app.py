@@ -3321,141 +3321,170 @@ def api_crossmarket_refresh():
     print('[CROSSMARKET] Cache cleared (' + str(len(cm_keys)) + ' keys), refetching...')
     return api_crossmarket()
 
-# ─── GEOPOLITICAL RISK INDEX ──────────────────────────────────────────────────
+# ─── GEOPOLITICAL RISK INDEX (AI-GPR) ─────────────────────────────────────────
 
-_GPR_COUNTRY_MAP = {
-    'TURKEY': {'code': 'TR', 'name': 'Turkey'},
-    'MEXICO': {'code': 'MX', 'name': 'Mexico'},
-    'KOREA': {'code': 'KR', 'name': 'South Korea'},
-    'RUSSIA': {'code': 'RU', 'name': 'Russia'},
-    'INDIA': {'code': 'IN', 'name': 'India'},
-    'BRAZIL': {'code': 'BR', 'name': 'Brazil'},
-    'CHINA': {'code': 'CN', 'name': 'China'},
-    'INDONESIA': {'code': 'ID', 'name': 'Indonesia'},
-    'SAUDI_ARABIA': {'code': 'SA', 'name': 'Saudi Arabia'},
-    'SOUTH_AFRICA': {'code': 'ZA', 'name': 'South Africa'},
-    'ARGENTINA': {'code': 'AR', 'name': 'Argentina'},
-    'COLOMBIA': {'code': 'CO', 'name': 'Colombia'},
-    'VENEZUELA': {'code': 'VE', 'name': 'Venezuela'},
-    'THAILAND': {'code': 'TH', 'name': 'Thailand'},
-    'UKRAINE': {'code': 'UA', 'name': 'Ukraine'},
-    'ISRAEL': {'code': 'IL', 'name': 'Israel'},
-    'MALAYSIA': {'code': 'MY', 'name': 'Malaysia'},
-    'PHILIPPINES': {'code': 'PH', 'name': 'Philippines'},
-    'HONG_KONG': {'code': 'HK', 'name': 'Hong Kong'},
-}
+_AI_GPR_BASE = 'https://www.matteoiacoviello.com/ai_gpr_files/'
+
+def _fetch_csv(filename):
+    """Download a CSV from the AI-GPR data server, return list of rows (dicts)."""
+    import csv, io
+    url = _AI_GPR_BASE + filename
+    print('[GPR] Downloading ' + filename + '...')
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    raw = urllib.request.urlopen(req, timeout=60).read().decode('utf-8')
+    reader = csv.DictReader(io.StringIO(raw))
+    return list(reader), reader.fieldnames
 
 def build_geopolitical_data():
-    """Download GPR xlsx and parse global + country data."""
-    import io
+    """Download AI-GPR CSV files and build response."""
     try:
-        import openpyxl
-    except ImportError:
-        print('[GPR] openpyxl not installed')
-        return None
+        # --- 1. Monthly global (ai_gpr_data_monthly.csv) ---
+        monthly_rows, _ = _fetch_csv('ai_gpr_data_monthly.csv')
+        m_dates = []
+        m_values = []
+        m_oil = []
+        for r in monthly_rows:
+            d = r.get('Date', '')[:7]
+            v = r.get('GPR_AI')
+            oil = r.get('GPR_OIL')
+            if not d or v is None:
+                continue
+            m_dates.append(d)
+            m_values.append(round(float(v), 2))
+            m_oil.append(round(float(oil), 2) if oil else None)
+        print('[GPR] Monthly: ' + str(len(m_dates)) + ' months')
 
-    url = 'https://www.matteoiacoviello.com/gpr_files/gpr_web_latest.xlsx'
-    print('[GPR] Downloading GPR xlsx...')
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        raw = urllib.request.urlopen(req, timeout=30).read()
-    except Exception as e:
-        print('[GPR] Download failed: ' + str(e))
-        return None
+        # --- 2. Daily global last 365 days (ai_gpr_data_daily.csv) ---
+        daily_rows, _ = _fetch_csv('ai_gpr_data_daily.csv')
+        cutoff = (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
+        d_dates = []
+        d_values = []
+        for r in daily_rows:
+            d = r.get('Date', '')[:10]
+            v = r.get('GPR_AI')
+            if not d or d < cutoff or v is None:
+                continue
+            d_dates.append(d)
+            d_values.append(round(float(v), 2))
+        print('[GPR] Daily (last 365d): ' + str(len(d_dates)) + ' days')
 
-    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)
+        # --- 3. Event types (ai_gpr_eventtype_monthly.csv) ---
+        evt_rows, evt_fields = _fetch_csv('ai_gpr_eventtype_monthly.csv')
+        evt_keys = [f for f in (evt_fields or []) if f not in ('Date', 'GPR_AI')]
+        event_types = {k: [] for k in evt_keys}
+        evt_dates = []
+        for r in evt_rows:
+            d = r.get('Date', '')[:7]
+            if not d:
+                continue
+            evt_dates.append(d)
+            for k in evt_keys:
+                v = r.get(k)
+                event_types[k].append(round(float(v), 2) if v else None)
+        # Latest event values for dashboard
+        evt_latest = {}
+        evt_prev = {}
+        for k in evt_keys:
+            vals = event_types[k]
+            evt_latest[k] = vals[-1] if vals else None
+            evt_prev[k] = vals[-2] if len(vals) >= 2 else None
+        print('[GPR] Event types: ' + str(len(evt_keys)) + ' categories, ' + str(len(evt_dates)) + ' months')
 
-    # --- Global GPR ---
-    ws = wb['GPR']
-    dates = []
-    gpr_vals = []
-    gpt_vals = []
-    gpa_vals = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        dt = row[0]
-        if not dt:
-            continue
-        if hasattr(dt, 'strftime'):
-            d_str = dt.strftime('%Y-%m')
+        # --- 4. Country monthly (ai_gpr_country_monthly.csv) ---
+        country_rows, country_fields = _fetch_csv('ai_gpr_country_monthly.csv')
+        # Parse unique country names from headers (Country_role pattern)
+        country_names = set()
+        for h in (country_fields or []):
+            if h in ('Date', 'GPR_AI'):
+                continue
+            parts = h.rsplit('_', 1)
+            if len(parts) == 2 and parts[1] in ('all', 'initiator', 'respondent', 'spillover'):
+                country_names.add(parts[0])
+
+        # Get last 2 rows
+        if len(country_rows) < 2:
+            countries = {}
+            top_risks = []
         else:
-            d_str = str(dt)[:7]
-        gpr_v = row[1]
-        gpt_v = row[2]
-        gpa_v = row[3]
-        if gpr_v is None:
-            continue
-        dates.append(d_str)
-        gpr_vals.append(round(float(gpr_v), 2))
-        gpt_vals.append(round(float(gpt_v), 2) if gpt_v is not None else None)
-        gpa_vals.append(round(float(gpa_v), 2) if gpa_v is not None else None)
+            last_row = country_rows[-1]
+            prev_row = country_rows[-2]
+            last_date = last_row.get('Date', '')[:7]
 
-    # --- Country GPR ---
-    ws_c = wb['GPR_COUNTRIES']
-    headers = list(next(ws_c.iter_rows(min_row=1, max_row=1, values_only=True)))
-    country_cols = {}
-    for i, h in enumerate(headers):
-        if h and h.startswith('GPR_'):
-            key = h[4:]
-            if key in _GPR_COUNTRY_MAP:
-                country_cols[i] = key
+            country_data = {}
+            for name in country_names:
+                all_col = name + '_all'
+                init_col = name + '_initiator'
+                resp_col = name + '_respondent'
+                spill_col = name + '_spillover'
+                try:
+                    latest_v = float(last_row.get(all_col, 0) or 0)
+                except:
+                    latest_v = 0
+                try:
+                    prev_v = float(prev_row.get(all_col, 0) or 0)
+                except:
+                    prev_v = 0
+                try:
+                    init_v = float(last_row.get(init_col, 0) or 0)
+                except:
+                    init_v = 0
+                try:
+                    resp_v = float(last_row.get(resp_col, 0) or 0)
+                except:
+                    resp_v = 0
+                try:
+                    spill_v = float(last_row.get(spill_col, 0) or 0)
+                except:
+                    spill_v = 0
+                country_data[name] = {
+                    'latest': round(latest_v, 2),
+                    'prev': round(prev_v, 2),
+                    'initiator': round(init_v, 2),
+                    'respondent': round(resp_v, 2),
+                    'spillover': round(spill_v, 2),
+                }
 
-    country_series = {k: [] for k in country_cols.values()}
-    country_dates = []
-    for row in ws_c.iter_rows(min_row=2, values_only=True):
-        dt = row[0]
-        if not dt:
-            continue
-        if hasattr(dt, 'strftime'):
-            d_str = dt.strftime('%Y-%m')
-        else:
-            d_str = str(dt)[:7]
-        country_dates.append(d_str)
-        for col_idx, key in country_cols.items():
-            v = row[col_idx] if col_idx < len(row) else None
-            country_series[key].append(round(float(v), 2) if v is not None else None)
+            # Sort by latest GPR and take top 50
+            ranked = sorted(country_data.items(), key=lambda x: x[1]['latest'], reverse=True)[:50]
+            countries = {}
+            for name, d in ranked:
+                change = round(d['latest'] - d['prev'], 2)
+                countries[name] = {
+                    'name': name,
+                    'latest': d['latest'],
+                    'change': change,
+                    'initiator': d['initiator'],
+                    'respondent': d['respondent'],
+                    'spillover': d['spillover'],
+                }
 
-    wb.close()
+            top_risks = sorted(
+                [{'name': k, 'gpr': v['latest'], 'change': v['change']}
+                 for k, v in countries.items() if v['latest'] > 0],
+                key=lambda x: x['gpr'], reverse=True
+            )[:10]
 
-    # Build country summaries
-    countries = {}
-    for key, info in _GPR_COUNTRY_MAP.items():
-        vals = country_series.get(key, [])
-        if not vals:
-            continue
-        latest = None
-        prev = None
-        for v in reversed(vals):
-            if v is not None:
-                if latest is None:
-                    latest = v
-                elif prev is None:
-                    prev = v
-                    break
-        change = round(latest - prev, 2) if latest is not None and prev is not None else None
-        countries[info['code']] = {
-            'name': info['name'],
-            'latest': latest,
-            'change': change,
+        print('[GPR] Countries: ' + str(len(countries)) + ' (top 50), topRisks: ' + str(len(top_risks)))
+
+        return {
+            'gpr': {
+                'dates': m_dates,
+                'values': m_values,
+                'oil': m_oil,
+                'dailyDates': d_dates,
+                'dailyValues': d_values,
+            },
+            'eventTypes': event_types,
+            'evtLatest': evt_latest,
+            'evtPrev': evt_prev,
+            'countries': countries,
+            'topRisks': top_risks,
+            'lastDate': m_dates[-1] if m_dates else None,
         }
-
-    # Top risks
-    top_risks = sorted(
-        [{'code': k, 'name': v['name'], 'gpr': v['latest'], 'change': v['change']}
-         for k, v in countries.items() if v['latest'] is not None],
-        key=lambda x: x['gpr'], reverse=True
-    )[:10]
-
-    print('[GPR] Parsed: ' + str(len(dates)) + ' months, ' + str(len(countries)) + ' countries')
-    return {
-        'gpr': {
-            'dates': dates,
-            'gpr': gpr_vals,
-            'gpt': gpt_vals,
-            'gpa': gpa_vals,
-        },
-        'countries': countries,
-        'topRisks': top_risks,
-    }
+    except Exception as e:
+        print('[GPR] build_geopolitical_data error: ' + str(e))
+        import traceback; traceback.print_exc()
+        return None
 
 
 @app.route('/api/geopolitical')
