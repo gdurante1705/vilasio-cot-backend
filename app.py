@@ -2149,6 +2149,30 @@ def build_earnings_data():
         if before_filter != len(upcoming):
             print('[EARNINGS] Filtered out ' + str(before_filter - len(upcoming)) + ' stocks with date beyond ' + cutoff)
 
+        # Analyst ratings via yfinance (max 20 stocks, cached with upcoming)
+        print('[EARNINGS] Fetching analyst ratings (max 20)...')
+        import yfinance as yf
+        rated = 0
+        for u in upcoming[:20]:
+            try:
+                info = yf.Ticker(u['symbol']).info
+                u['analystRating'] = info.get('recommendationKey', '') or ''
+                u['targetPrice'] = info.get('targetMeanPrice', None)
+                u['numberOfAnalysts'] = info.get('numberOfAnalystOpinions', None)
+                if u['analystRating']:
+                    rated += 1
+            except Exception as e:
+                u['analystRating'] = ''
+                u['targetPrice'] = None
+                u['numberOfAnalysts'] = None
+                print('[EARNINGS] analyst ' + u['symbol'] + ': ' + str(e))
+        # Fill defaults for stocks beyond top 20
+        for u in upcoming[20:]:
+            u['analystRating'] = ''
+            u['targetPrice'] = None
+            u['numberOfAnalysts'] = None
+        print('[EARNINGS] Analyst ratings fetched: ' + str(rated) + '/' + str(min(len(upcoming), 20)))
+
         # Sort: date ascending (primary), market cap descending (secondary)
         upcoming.sort(key=lambda x: (x.get('date') or 'zzzz', -(x.get('marketCap') or 0)))
         # Only cache if we got results — avoid caching empty [] for 2 hours after Finviz 403
@@ -2470,6 +2494,36 @@ def api_earnings_refresh():
         _cache_time.pop(k, None)
     print('[EARNINGS] Cache cleared (' + str(len(keys)) + ' keys)')
     return api_earnings()
+
+@app.route('/api/earnings/history')
+def api_earnings_history():
+    """Return last 4 quarters of EPS actual vs estimate for a symbol (Finnhub)."""
+    sym = request.args.get('symbol', '').upper()
+    if not sym:
+        return jsonify({'status': 'error', 'message': 'Missing symbol parameter'}), 400
+    try:
+        ck = 'earnings_hist_' + sym
+        now = datetime.datetime.now()
+        if ck in _cache and (now - _cache_time.get(ck, now)).total_seconds() < 86400:
+            return jsonify(_cache[ck])
+        data = fetch_finnhub('stock/earnings?symbol=' + sym)
+        quarters = []
+        if isinstance(data, list):
+            for item in data[:4]:
+                quarters.append({
+                    'date': item.get('period', ''),
+                    'epsActual': item.get('actual'),
+                    'epsEstimate': item.get('estimate'),
+                    'surprise': item.get('surprise'),
+                    'surprisePercent': item.get('surprisePercent'),
+                })
+        result = {'status': 'ok', 'symbol': sym, 'quarters': quarters}
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return jsonify(result)
+    except Exception as e:
+        print('[EARNINGS] history ' + sym + ': ' + str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 # ─── CONGRESSIONAL POSITIONING ────────────────────────────────────────────────
