@@ -2142,6 +2142,13 @@ def build_earnings_data():
                 except Exception as e:
                     print('[EARNINGS] yfinance date ' + u['symbol'] + ': ' + str(e))
 
+        # Filter out stocks with dates more than 14 days from today (yfinance may return far-future dates)
+        cutoff = (today + datetime.timedelta(days=14)).isoformat()
+        before_filter = len(upcoming)
+        upcoming = [u for u in upcoming if not u.get('date') or u['date'] <= cutoff]
+        if before_filter != len(upcoming):
+            print('[EARNINGS] Filtered out ' + str(before_filter - len(upcoming)) + ' stocks with date beyond ' + cutoff)
+
         # Sort: date ascending (primary), market cap descending (secondary)
         upcoming.sort(key=lambda x: (x.get('date') or 'zzzz', -(x.get('marketCap') or 0)))
         # Only cache if we got results — avoid caching empty [] for 2 hours after Finviz 403
