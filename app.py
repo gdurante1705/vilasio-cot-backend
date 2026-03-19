@@ -3565,6 +3565,280 @@ def api_geopolitical_refresh():
     return api_geopolitical()
 
 
+# ─── COCKPIT DASHBOARD ────────────────────────────────────────────────────────
+
+def build_cockpit_data():
+    """Aggregate data from all endpoints into a single cockpit view."""
+    import yfinance as yf
+    result = {}
+
+    # --- 1. MACRO REGIME ---
+    try:
+        cpi_obs = fetch_fred('CPIAUCSL', 3)
+        unrate_obs = fetch_fred('UNRATE', 3)
+        gdp_obs = fetch_fred('GDPC1', 3)
+        ff_obs = fetch_fred('FEDFUNDS', 2)
+        nfp_obs = fetch_fred('PAYEMS', 2)
+
+        def _last(obs): return obs[-1]['value'] if obs else None
+        def _prev(obs, n=3): return obs[-n]['value'] if len(obs) >= n else None
+        def _trend(cur, prev):
+            if cur is None or prev is None: return 'neutral'
+            if cur > prev * 1.01: return 'rising'
+            if cur < prev * 0.99: return 'declining'
+            return 'holding'
+        def _signal(trend, bullish_dir):
+            if trend == 'neutral' or trend == 'holding': return 'neutral'
+            return 'bullish' if (trend == bullish_dir) else 'bearish'
+
+        # CPI YoY
+        cpi_vals = [o['value'] for o in cpi_obs if o['value'] is not None]
+        cpi_yoy = None
+        cpi_yoy_prev = None
+        if len(cpi_vals) >= 13:
+            cpi_yoy = round((cpi_vals[-1] / cpi_vals[-13] - 1) * 100, 2)
+        if len(cpi_vals) >= 16:
+            cpi_yoy_prev = round((cpi_vals[-4] / cpi_vals[-16] - 1) * 100, 2)
+
+        gdp_v = _last(gdp_obs)
+        gdp_prev = _prev(gdp_obs, 2)
+        unrate_v = _last(unrate_obs)
+        unrate_prev = _prev(unrate_obs)
+        ff_v = _last(ff_obs)
+        ff_prev = _prev(ff_obs)
+
+        # SPX from yfinance
+        spx_price = None
+        spx_prev = None
+        try:
+            spx_hist = yf.Ticker('^GSPC').history(period='3mo')
+            if spx_hist is not None and len(spx_hist) >= 2:
+                spx_price = round(float(spx_hist['Close'].iloc[-1]), 2)
+                spx_prev = round(float(spx_hist['Close'].iloc[0]), 2)
+        except:
+            pass
+
+        # NFP for growth
+        nfp_vals = [o['value'] for o in nfp_obs if o['value'] is not None]
+        nfp_chgs = []
+        if len(nfp_vals) >= 4:
+            for i in range(-3, 0):
+                nfp_chgs.append(nfp_vals[i] - nfp_vals[i-1])
+        nfp_avg = sum(nfp_chgs) / len(nfp_chgs) if nfp_chgs else 0
+
+        # Regime determination
+        growth_up = nfp_avg > 0
+        inf_rising = cpi_yoy is not None and cpi_yoy_prev is not None and cpi_yoy > cpi_yoy_prev
+        if growth_up and inf_rising: regime_label = 'EXPANSION'
+        elif growth_up and not inf_rising: regime_label = 'REFLATION'
+        elif not growth_up and inf_rising: regime_label = 'STAGFLATION'
+        else: regime_label = 'CONTRACTION'
+
+        # Score (0-100, higher = more bullish)
+        signals = []
+        gdp_trend = _trend(gdp_v, gdp_prev)
+        unrate_trend = _trend(unrate_v, unrate_prev)
+        inf_trend = _trend(cpi_yoy, cpi_yoy_prev)
+        ff_trend = _trend(ff_v, ff_prev)
+        spx_trend = _trend(spx_price, spx_prev)
+
+        score_map = {'bullish': 1, 'neutral': 0.5, 'bearish': 0}
+        scores = [
+            score_map.get(_signal(gdp_trend, 'rising'), 0.5),
+            score_map.get(_signal(unrate_trend, 'declining'), 0.5),
+            score_map.get(_signal(inf_trend, 'declining'), 0.5),
+            score_map.get(_signal(ff_trend, 'declining'), 0.5),
+            score_map.get(_signal(spx_trend, 'rising'), 0.5),
+        ]
+        regime_score = round(sum(scores) / len(scores) * 100)
+
+        indicators = {
+            'gdp': {'value': gdp_v, 'trend': gdp_trend, 'signal': _signal(gdp_trend, 'rising')},
+            'unemployment': {'value': unrate_v, 'trend': unrate_trend, 'signal': _signal(unrate_trend, 'declining')},
+            'inflation': {'value': cpi_yoy, 'trend': inf_trend, 'signal': _signal(inf_trend, 'declining')},
+            'fedRate': {'value': ff_v, 'trend': ff_trend, 'signal': _signal(ff_trend, 'declining')},
+            'spx': {'value': spx_price, 'trend': spx_trend, 'signal': _signal(spx_trend, 'rising')},
+        }
+
+        result['regime'] = {'label': regime_label, 'score': regime_score, 'indicators': indicators}
+    except Exception as e:
+        print('[COCKPIT] regime error: ' + str(e))
+        result['regime'] = {'label': 'UNKNOWN', 'score': 50, 'indicators': {}}
+
+    # --- 2. MARKETS (prices + COT bias) ---
+    try:
+        # COT summary for bias
+        cot_ck = 'cot_summary'
+        cot_data = _cache.get(cot_ck, {})
+        cot_markets = {}
+        if isinstance(cot_data, dict):
+            for m in cot_data.get('markets', []):
+                cot_markets[m.get('market', '')] = m
+
+        market_tickers = {
+            'indices': [
+                {'symbol': 'ES', 'name': 'S&P 500', 'yf': '^GSPC'},
+                {'symbol': 'NQ', 'name': 'Nasdaq 100', 'yf': '^NDX'},
+                {'symbol': 'YM', 'name': 'Dow Jones', 'yf': '^DJI'},
+                {'symbol': 'RTY', 'name': 'Russell 2000', 'yf': '^RUT'},
+            ],
+            'commodities': [
+                {'symbol': 'GC', 'name': 'Gold', 'yf': 'GC=F'},
+                {'symbol': 'CL', 'name': 'Crude Oil', 'yf': 'CL=F'},
+                {'symbol': 'SI', 'name': 'Silver', 'yf': 'SI=F'},
+                {'symbol': 'HG', 'name': 'Copper', 'yf': 'HG=F'},
+            ],
+            'currencies': [
+                {'symbol': 'DX', 'name': 'Dollar Index', 'yf': 'DX-Y.NYB'},
+                {'symbol': '6E', 'name': 'EUR/USD', 'yf': 'EURUSD=X'},
+                {'symbol': '6J', 'name': 'USD/JPY', 'yf': 'JPY=X'},
+                {'symbol': '6B', 'name': 'GBP/USD', 'yf': 'GBPUSD=X'},
+            ],
+            'bonds': [
+                {'symbol': 'ZN', 'name': '10Y Note', 'yf': '^TNX'},
+                {'symbol': 'ZB', 'name': '30Y Bond', 'yf': '^TYX'},
+            ],
+        }
+
+        markets = {}
+        for cat, items in market_tickers.items():
+            cat_list = []
+            for item in items:
+                entry = {'symbol': item['symbol'], 'name': item['name'], 'price': None, 'chg1D': None, 'chg1W': None, 'chg1M': None}
+                try:
+                    data = fetch_yf_daily(item['yf'], 1)
+                    vals = data.get('values', [])
+                    if vals:
+                        entry['price'] = vals[-1]
+                        if len(vals) >= 2: entry['chg1D'] = round((vals[-1] - vals[-2]) / vals[-2] * 100, 2) if vals[-2] else None
+                        if len(vals) >= 6: entry['chg1W'] = round((vals[-1] - vals[-6]) / vals[-6] * 100, 2) if vals[-6] else None
+                        if len(vals) >= 22: entry['chg1M'] = round((vals[-1] - vals[-22]) / vals[-22] * 100, 2) if vals[-22] else None
+                except:
+                    pass
+                # COT bias
+                cot = cot_markets.get(item['symbol'], {})
+                bp = cot.get('bpNet', 0) or 0
+                entry['cotBias'] = 'BULLISH' if bp > 0 else ('BEARISH' if bp < 0 else 'NEUTRAL')
+                if cat == 'bonds':
+                    entry['yield'] = entry['price']
+                cat_list.append(entry)
+            markets[cat] = cat_list
+        result['markets'] = markets
+    except Exception as e:
+        print('[COCKPIT] markets error: ' + str(e))
+        result['markets'] = {}
+
+    # --- 3. FLOW REGIME ---
+    try:
+        flow_ck = 'cot_flow_1'
+        flow_data = _cache.get(flow_ck)
+        if flow_data and isinstance(flow_data, dict):
+            result['flowRegime'] = flow_data.get('regime', 'UNKNOWN')
+            cats = flow_data.get('categories', {})
+            flows = []
+            for cat_name, cat_data in cats.items():
+                chg = cat_data.get('bpNetChg', 0) or 0
+                flows.append({'category': cat_name, 'change': chg, 'direction': 'INFLOW' if chg > 0 else 'OUTFLOW'})
+            flows.sort(key=lambda x: abs(x['change']), reverse=True)
+            result['topFlows'] = flows[:6]
+        else:
+            result['flowRegime'] = 'UNKNOWN'
+            result['topFlows'] = []
+    except Exception as e:
+        print('[COCKPIT] flow error: ' + str(e))
+        result['flowRegime'] = 'UNKNOWN'
+        result['topFlows'] = []
+
+    # --- 4. SECTOR LEADERS/LAGGARDS ---
+    try:
+        sectors = build_sector_rotation()
+        if sectors:
+            sectors_sorted = sorted(sectors, key=lambda x: x.get('chg1W') or 0, reverse=True)
+            result['sectorLeaders'] = [{'symbol': s['symbol'], 'name': s['name'], 'chg1W': s.get('chg1W')} for s in sectors_sorted[:3]]
+            result['sectorLaggards'] = [{'symbol': s['symbol'], 'name': s['name'], 'chg1W': s.get('chg1W')} for s in sectors_sorted[-3:]]
+        else:
+            result['sectorLeaders'] = []
+            result['sectorLaggards'] = []
+    except Exception as e:
+        print('[COCKPIT] sectors error: ' + str(e))
+        result['sectorLeaders'] = []
+        result['sectorLaggards'] = []
+
+    # --- 5. GPR ---
+    try:
+        gpr_ck = 'geopolitical_main'
+        gpr_data = _cache.get(gpr_ck) or {}
+        gpr_vals = (gpr_data.get('gpr') or {}).get('values', [])
+        gpr_latest = gpr_vals[-1] if gpr_vals else None
+        gpr_level = 'EXTREME' if gpr_latest and gpr_latest > 200 else 'HIGH' if gpr_latest and gpr_latest > 120 else 'ELEVATED' if gpr_latest and gpr_latest > 80 else 'LOW'
+        result['gpr'] = {'value': gpr_latest, 'level': gpr_level}
+    except:
+        result['gpr'] = {'value': None, 'level': 'UNKNOWN'}
+
+    # --- 6. EARNINGS SIGNALS ---
+    try:
+        earn_ck = 'earnings_main'
+        earn_data = _cache.get(earn_ck) or {}
+        sigs = [s for s in earn_data.get('signals', []) if s.get('isActive')]
+        result['earningsSignals'] = len(sigs)
+        result['upcomingEarnings'] = len(earn_data.get('upcoming', []))
+    except:
+        result['earningsSignals'] = 0
+        result['upcomingEarnings'] = 0
+
+    # --- 7. VIX ---
+    try:
+        vix_data = fetch_yf_daily('^VIX', 1)
+        vix_vals = vix_data.get('values', [])
+        vix_v = vix_vals[-1] if vix_vals else None
+        vix_prev = vix_vals[-2] if len(vix_vals) >= 2 else None
+        vix_chg = round(vix_v - vix_prev, 2) if vix_v and vix_prev else None
+        result['vix'] = {'value': vix_v, 'chg': vix_chg}
+    except:
+        result['vix'] = {'value': None, 'chg': None}
+
+    # --- 8. YIELD CURVE ---
+    try:
+        gs10 = fetch_fred('DGS10', 1)
+        gs2 = fetch_fred('DGS2', 1)
+        y10 = gs10[-1]['value'] if gs10 else None
+        y2 = gs2[-1]['value'] if gs2 else None
+        spread = round(y10 - y2, 3) if y10 is not None and y2 is not None else None
+        yc_signal = 'INVERTED' if spread is not None and spread < 0 else ('FLAT' if spread is not None and abs(spread) < 0.15 else 'NORMAL')
+        result['yieldCurve'] = {'spread2s10s': spread, 'signal': yc_signal, 'y10': y10, 'y2': y2}
+    except:
+        result['yieldCurve'] = {'spread2s10s': None, 'signal': 'UNKNOWN'}
+
+    return result
+
+
+@app.route('/api/cockpit')
+def api_cockpit():
+    try:
+        ck = 'cockpit_main'
+        now = datetime.datetime.now()
+        if ck in _cache and (now - _cache_time.get(ck, now)).total_seconds() < 3600:
+            return jsonify(_cache[ck])
+        data = build_cockpit_data()
+        result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
+        result.update(data)
+        _cache[ck] = result
+        _cache_time[ck] = now
+        return jsonify(result)
+    except Exception as e:
+        print('[COCKPIT] ' + str(e))
+        import traceback; traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/cockpit/refresh')
+def api_cockpit_refresh():
+    _cache.pop('cockpit_main', None)
+    _cache_time.pop('cockpit_main', None)
+    print('[COCKPIT] Cache cleared')
+    return api_cockpit()
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
