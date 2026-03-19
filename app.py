@@ -2238,10 +2238,10 @@ def build_earnings_data():
                     mcap = float(mcap_str)
             except:
                 mcap = 0
-        # Filter market cap 10B-200B
-        if mcap and (mcap < 10e9 or mcap > 200e9):
+        # Filter market cap >= 10B
+        if mcap and mcap < 10e9:
             if _sig_debug <= 5:
-                print('[EARNINGS] ' + sym + ': mcap ' + str(mcap_str) + ' outside 10B-200B, skipping')
+                print('[EARNINGS] ' + sym + ': mcap ' + str(mcap_str) + ' below 10B, skipping')
             continue
 
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
