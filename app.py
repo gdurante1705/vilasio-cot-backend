@@ -3401,14 +3401,19 @@ def build_geopolitical_data():
             if len(parts) == 2 and parts[1] in ('all', 'initiator', 'respondent', 'spillover'):
                 country_names.add(parts[0])
 
-        # Get last 2 rows
+        # Get recent rows (last 6 months for fallback)
         if len(country_rows) < 2:
             countries = {}
             top_risks = []
         else:
-            last_row = country_rows[-1]
-            prev_row = country_rows[-2]
-            last_date = last_row.get('Date', '')[:7]
+            recent_rows = country_rows[-6:] if len(country_rows) >= 6 else country_rows
+
+            def _safe_float(row, col):
+                try:
+                    v = float(row.get(col, 0) or 0)
+                    return round(v, 2)
+                except:
+                    return 0
 
             country_data = {}
             for name in country_names:
@@ -3416,32 +3421,45 @@ def build_geopolitical_data():
                 init_col = name + '_initiator'
                 resp_col = name + '_respondent'
                 spill_col = name + '_spillover'
-                try:
-                    latest_v = float(last_row.get(all_col, 0) or 0)
-                except:
-                    latest_v = 0
-                try:
-                    prev_v = float(prev_row.get(all_col, 0) or 0)
-                except:
-                    prev_v = 0
-                try:
-                    init_v = float(last_row.get(init_col, 0) or 0)
-                except:
-                    init_v = 0
-                try:
-                    resp_v = float(last_row.get(resp_col, 0) or 0)
-                except:
-                    resp_v = 0
-                try:
-                    spill_v = float(last_row.get(spill_col, 0) or 0)
-                except:
-                    spill_v = 0
+
+                # Find most recent non-zero value in last 6 months
+                latest_v = 0
+                prev_v = 0
+                init_v = 0
+                resp_v = 0
+                spill_v = 0
+                found_latest = False
+                for r in reversed(recent_rows):
+                    v = _safe_float(r, all_col)
+                    if not found_latest:
+                        if v > 0:
+                            latest_v = v
+                            init_v = _safe_float(r, init_col)
+                            resp_v = _safe_float(r, resp_col)
+                            spill_v = _safe_float(r, spill_col)
+                            found_latest = True
+                        elif r is recent_rows[-1]:
+                            # Last row is 0 — keep looking, but record roles from last row
+                            init_v = _safe_float(r, init_col)
+                            resp_v = _safe_float(r, resp_col)
+                            spill_v = _safe_float(r, spill_col)
+                    else:
+                        # Found latest, now find prev for change calculation
+                        if v > 0 or r is not recent_rows[-1]:
+                            prev_v = v
+                            break
+
+                # If no non-zero found in 6 months, latest is truly 0
+                if not found_latest:
+                    latest_v = _safe_float(recent_rows[-1], all_col)
+                    prev_v = _safe_float(recent_rows[-2], all_col) if len(recent_rows) >= 2 else 0
+
                 country_data[name] = {
-                    'latest': round(latest_v, 2),
-                    'prev': round(prev_v, 2),
-                    'initiator': round(init_v, 2),
-                    'respondent': round(resp_v, 2),
-                    'spillover': round(spill_v, 2),
+                    'latest': latest_v,
+                    'prev': prev_v,
+                    'initiator': init_v,
+                    'respondent': resp_v,
+                    'spillover': spill_v,
                 }
 
             # Top 50 by score for series data
