@@ -3446,9 +3446,31 @@ def build_geopolitical_data():
 
             # Sort by latest GPR and take top 50
             ranked = sorted(country_data.items(), key=lambda x: x[1]['latest'], reverse=True)[:50]
+            top50_names = set(n for n, _ in ranked)
+
+            # Build 10-year monthly series for top 50
+            ten_yr_cutoff = (datetime.date.today() - datetime.timedelta(days=3650)).isoformat()[:7]
+            country_series = {}
+            for name in top50_names:
+                country_series[name] = {'dates': [], 'values': []}
+            for r in country_rows:
+                d = r.get('Date', '')[:7]
+                if not d or d < ten_yr_cutoff:
+                    continue
+                for name in top50_names:
+                    col = name + '_all'
+                    v = r.get(col)
+                    try:
+                        fv = round(float(v), 2) if v else 0
+                    except:
+                        fv = 0
+                    country_series[name]['dates'].append(d)
+                    country_series[name]['values'].append(fv)
+
             countries = {}
             for name, d in ranked:
                 change = round(d['latest'] - d['prev'], 2)
+                cs = country_series.get(name, {'dates': [], 'values': []})
                 countries[name] = {
                     'name': name,
                     'latest': d['latest'],
@@ -3456,6 +3478,7 @@ def build_geopolitical_data():
                     'initiator': d['initiator'],
                     'respondent': d['respondent'],
                     'spillover': d['spillover'],
+                    'series': cs,
                 }
 
             top_risks = sorted(
