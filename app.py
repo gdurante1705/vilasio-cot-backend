@@ -2034,58 +2034,59 @@ def build_earnings_data():
         upcoming = []
         try:
             from finvizfinance.screener.overview import Overview
-            for exch in ['NYSE', 'NASDAQ']:
-                fov = Overview()
-                fov.set_filter(filters_dict={
-                    'Exchange': exch,
-                    'Market Cap.': 'Large ($10bln to $200bln)',
-                    'Earnings Date': 'Next Week',
-                })
-                df = fov.screener_view()
-                if df is not None and not df.empty:
-                    print('[EARNINGS] Finviz ' + exch + ': ' + str(len(df)) + ' stocks')
-                    for _, row in df.iterrows():
-                        sym = str(row.get('Ticker', ''))
-                        if not sym:
-                            continue
-                        raw_sector = str(row.get('Sector', ''))
-                        sector = _FINVIZ_SECTOR_MAP.get(raw_sector, raw_sector)
-                        sector_etf = SECTOR_ETF_MAP.get(sector, '')
-                        sector_trend_info = market_trend.get(sector_etf, {})
-                        # Parse market cap string (e.g. "53.1B" or "12.3B")
-                        mcap_raw = row.get('Market Cap', 0)
-                        if isinstance(mcap_raw, str):
-                            mcap_raw = mcap_raw.replace(',', '')
-                            if mcap_raw.endswith('B'):
-                                mcap_val = float(mcap_raw[:-1]) * 1e9
-                            elif mcap_raw.endswith('M'):
-                                mcap_val = float(mcap_raw[:-1]) * 1e6
+            for period in ['This Week', 'Next Week']:
+                for exch in ['NYSE', 'NASDAQ']:
+                    fov = Overview()
+                    fov.set_filter(filters_dict={
+                        'Exchange': exch,
+                        'Market Cap.': '+Large (over $10bln)',
+                        'Earnings Date': period,
+                    })
+                    df = fov.screener_view()
+                    if df is not None and not df.empty:
+                        print('[EARNINGS] Finviz ' + period + ' ' + exch + ': ' + str(len(df)) + ' stocks')
+                        for _, row in df.iterrows():
+                            sym = str(row.get('Ticker', ''))
+                            if not sym:
+                                continue
+                            raw_sector = str(row.get('Sector', ''))
+                            sector = _FINVIZ_SECTOR_MAP.get(raw_sector, raw_sector)
+                            sector_etf = SECTOR_ETF_MAP.get(sector, '')
+                            sector_trend_info = market_trend.get(sector_etf, {})
+                            # Parse market cap string (e.g. "53.1B" or "12.3B")
+                            mcap_raw = row.get('Market Cap', 0)
+                            if isinstance(mcap_raw, str):
+                                mcap_raw = mcap_raw.replace(',', '')
+                                if mcap_raw.endswith('B'):
+                                    mcap_val = float(mcap_raw[:-1]) * 1e9
+                                elif mcap_raw.endswith('M'):
+                                    mcap_val = float(mcap_raw[:-1]) * 1e6
+                                else:
+                                    try:
+                                        mcap_val = float(mcap_raw)
+                                    except:
+                                        mcap_val = 0
                             else:
-                                try:
-                                    mcap_val = float(mcap_raw)
-                                except:
-                                    mcap_val = 0
-                        else:
-                            mcap_val = float(mcap_raw or 0)
-                        upcoming.append({
-                            'symbol': sym,
-                            'name': str(row.get('Company', sym)),
-                            'date': '',  # Finviz doesn't give exact date in screener
-                            'marketCap': round(mcap_val) if mcap_val else None,
-                            'sector': sector,
-                            'sectorEtf': sector_etf,
-                            'sectorTrend': sector_trend_info.get('trend', ''),
-                            'epsEstimate': None,
-                            'revenueEstimate': None,
-                            'quarter': None,
-                            'year': None,
-                        })
-                else:
-                    print('[EARNINGS] Finviz ' + exch + ': 0 stocks')
+                                mcap_val = float(mcap_raw or 0)
+                            upcoming.append({
+                                'symbol': sym,
+                                'name': str(row.get('Company', sym)),
+                                'date': '',  # Finviz doesn't give exact date in screener
+                                'marketCap': round(mcap_val) if mcap_val else None,
+                                'sector': sector,
+                                'sectorEtf': sector_etf,
+                                'sectorTrend': sector_trend_info.get('trend', ''),
+                                'epsEstimate': None,
+                                'revenueEstimate': None,
+                                'quarter': None,
+                                'year': None,
+                            })
+                    else:
+                        print('[EARNINGS] Finviz ' + period + ' ' + exch + ': 0 stocks')
         except Exception as e:
             print('[EARNINGS] Finviz screener error: ' + str(e))
             import traceback; traceback.print_exc()
-        # Deduplicate by symbol
+        # Deduplicate by symbol (keep first occurrence — "This Week" is scraped first, closer date wins)
         seen = set()
         unique = []
         for u in upcoming:
@@ -2112,7 +2113,37 @@ def build_earnings_data():
                 matched += 1
         print('[EARNINGS] Finnhub dates matched: ' + str(matched) + '/' + str(len(upcoming)))
 
-        upcoming.sort(key=lambda x: x.get('date', 'z'))
+        # Fallback: yfinance for missing dates
+        missing_date = [u for u in upcoming if not u.get('date')]
+        if missing_date:
+            print('[EARNINGS] yfinance fallback for ' + str(len(missing_date)) + ' missing dates...')
+            import yfinance as yf
+            for u in missing_date:
+                try:
+                    tk = yf.Ticker(u['symbol'])
+                    cal = tk.calendar
+                    if cal is not None:
+                        # yfinance .calendar can be a dict or DataFrame
+                        if isinstance(cal, dict):
+                            ed = cal.get('Earnings Date')
+                            if isinstance(ed, list) and ed:
+                                ed = ed[0]
+                            if hasattr(ed, 'strftime'):
+                                u['date'] = ed.strftime('%Y-%m-%d')
+                                print('[EARNINGS] yfinance date for ' + u['symbol'] + ': ' + u['date'])
+                        elif hasattr(cal, 'columns'):
+                            if 'Earnings Date' in cal.columns:
+                                vals = cal['Earnings Date'].dropna()
+                                if not vals.empty:
+                                    ed = vals.iloc[0]
+                                    if hasattr(ed, 'strftime'):
+                                        u['date'] = ed.strftime('%Y-%m-%d')
+                                        print('[EARNINGS] yfinance date for ' + u['symbol'] + ': ' + u['date'])
+                except Exception as e:
+                    print('[EARNINGS] yfinance date ' + u['symbol'] + ': ' + str(e))
+
+        # Sort: date ascending (primary), market cap descending (secondary)
+        upcoming.sort(key=lambda x: (x.get('date') or 'zzzz', -(x.get('marketCap') or 0)))
         # Only cache if we got results — avoid caching empty [] for 2 hours after Finviz 403
         if upcoming:
             _cache[ck_upcoming] = upcoming
