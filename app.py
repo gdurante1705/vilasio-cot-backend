@@ -2012,7 +2012,8 @@ def build_earnings_data():
     print('[EARNINGS] Step 2: Upcoming earnings (Finviz screener)...')
     ck_upcoming = 'earnings_finviz_upcoming'
     now = datetime.datetime.now()
-    if ck_upcoming in _cache and (now - _cache_time[ck_upcoming]).total_seconds() < CACHE_TTL:
+    CACHE_TTL_UPCOMING = 3600 * 2  # 2 hours for upcoming earnings
+    if ck_upcoming in _cache and (now - _cache_time[ck_upcoming]).total_seconds() < CACHE_TTL_UPCOMING:
         upcoming = _cache[ck_upcoming]
         print('[EARNINGS] Upcoming from cache: ' + str(len(upcoming)))
     else:
@@ -2112,8 +2113,12 @@ def build_earnings_data():
         print('[EARNINGS] Finnhub dates matched: ' + str(matched) + '/' + str(len(upcoming)))
 
         upcoming.sort(key=lambda x: x.get('date', 'z'))
-        _cache[ck_upcoming] = upcoming
-        _cache_time[ck_upcoming] = now
+        # Only cache if we got results — avoid caching empty [] for 2 hours after Finviz 403
+        if upcoming:
+            _cache[ck_upcoming] = upcoming
+            _cache_time[ck_upcoming] = now
+        else:
+            print('[EARNINGS] Upcoming empty — NOT caching so next request retries')
     print('[EARNINGS] Final upcoming: ' + str(len(upcoming)))
 
     # --- Step 3: Recent earnings with positive surprise (Finnhub calendar → FMP profiles + candles) ---
