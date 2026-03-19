@@ -2033,17 +2033,31 @@ def build_earnings_data():
         }
         upcoming = []
         try:
+            import time as _time
             from finvizfinance.screener.overview import Overview
+            _fvz_ok = 0
+            _fvz_fail = 0
             for period in ['This Week', 'Next Week']:
                 for exch in ['NYSE', 'NASDAQ']:
-                    fov = Overview()
-                    fov.set_filter(filters_dict={
-                        'Exchange': exch,
-                        'Market Cap.': '+Large (over $10bln)',
-                        'Earnings Date': period,
-                    })
-                    df = fov.screener_view()
+                    df = None
+                    for attempt in range(2):
+                        try:
+                            fov = Overview()
+                            fov.set_filter(filters_dict={
+                                'Exchange': exch,
+                                'Market Cap.': '+Large (over $10bln)',
+                                'Earnings Date': period,
+                            })
+                            df = fov.screener_view()
+                            break
+                        except Exception as fe:
+                            if attempt == 0:
+                                print('[EARNINGS] Finviz ' + period + ' ' + exch + ' failed (' + str(fe) + '), retrying in 2s...')
+                                _time.sleep(2)
+                            else:
+                                print('[EARNINGS] Finviz ' + period + ' ' + exch + ' retry failed: ' + str(fe))
                     if df is not None and not df.empty:
+                        _fvz_ok += 1
                         print('[EARNINGS] Finviz ' + period + ' ' + exch + ': ' + str(len(df)) + ' stocks')
                         for _, row in df.iterrows():
                             sym = str(row.get('Ticker', ''))
@@ -2082,7 +2096,9 @@ def build_earnings_data():
                                 'year': None,
                             })
                     else:
+                        _fvz_fail += 1
                         print('[EARNINGS] Finviz ' + period + ' ' + exch + ': 0 stocks')
+            print('[EARNINGS] Finviz fetches: ' + str(_fvz_ok) + '/4 succeeded, ' + str(_fvz_fail) + '/4 empty/failed')
         except Exception as e:
             print('[EARNINGS] Finviz screener error: ' + str(e))
             import traceback; traceback.print_exc()
@@ -2461,6 +2477,29 @@ def build_earnings_data():
                and s['currentPrice'] >= s['preClose']]
     if len(signals) < before_count:
         print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated after live price update')
+
+    # --- Step 5: Analyst ratings for signals (yfinance, max 20) ---
+    print('[EARNINGS] Step 5: Analyst ratings for signals...')
+    sig_rated = 0
+    for sig in signals[:20]:
+        try:
+            import yfinance as yf
+            info = yf.Ticker(sig['symbol']).info
+            sig['analystRating'] = info.get('recommendationKey', '') or ''
+            sig['targetPrice'] = info.get('targetMeanPrice', None)
+            sig['numberOfAnalysts'] = info.get('numberOfAnalystOpinions', None)
+            if sig['analystRating']:
+                sig_rated += 1
+        except Exception as e:
+            sig['analystRating'] = ''
+            sig['targetPrice'] = None
+            sig['numberOfAnalysts'] = None
+            print('[EARNINGS] analyst sig ' + sig['symbol'] + ': ' + str(e))
+    for sig in signals[20:]:
+        sig['analystRating'] = ''
+        sig['targetPrice'] = None
+        sig['numberOfAnalysts'] = None
+    print('[EARNINGS] Signal analyst ratings: ' + str(sig_rated) + '/' + str(min(len(signals), 20)))
 
     return {
         'upcoming': upcoming,
