@@ -2943,6 +2943,8 @@ def build_correlation_matrix():
     for key, sym in assets.items():
         data = fetch_yf_daily(sym, 2)
         price_data[key] = data
+        nan_count = sum(1 for v in data['values'] if v is None or v != v)
+        print('[CROSSMARKET] ' + key + ' (' + sym + '): ' + str(len(data['dates'])) + ' points, ' + str(nan_count) + ' NaN')
 
     asset_keys = list(assets.keys())
     n = len(asset_keys)
@@ -2955,8 +2957,10 @@ def build_correlation_matrix():
             all_dates = s
         else:
             all_dates = all_dates & s
-    if not all_dates or len(all_dates) < 30:
-        # Fallback: empty matrix
+    common_count = len(all_dates) if all_dates else 0
+    print('[CROSSMARKET] Common dates: ' + str(common_count))
+    if not all_dates or common_count < 30:
+        print('[CROSSMARKET] FALLBACK: not enough common dates, returning zero matrix')
         return {'labels': asset_keys, 'current': [[0]*n for _ in range(n)], 'previous': [[0]*n for _ in range(n)]}
 
     common_dates = sorted(all_dates)
