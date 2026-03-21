@@ -2278,8 +2278,8 @@ def build_earnings_data():
                     mcap = float(mcap_str)
             except:
                 mcap = 0
-        # Filter market cap >= 10B
-        if mcap and mcap < 10e9:
+        # Filter market cap >= 2B (include mid-caps with strong earnings)
+        if mcap and mcap < 2e9:
             if _sig_debug <= 5:
                 print('[EARNINGS] ' + sym + ': mcap ' + str(mcap_str) + ' below 10B, skipping')
             continue
@@ -2382,21 +2382,11 @@ def build_earnings_data():
         if _sig_debug <= 5:
             print('[EARNINGS] Signal check ' + sym + ': price=' + str(round(current_price, 2)) + ' eLow=' + str(round(earnings_low, 2)) + ' preClose=' + str(round(pre_close, 2)) + ' drift=' + str(drift_pct) + ' gap=' + str(gap_pct) + ' entry=' + str(round(earnings_high, 2)) + ' days=' + str(days_since))
 
-        # --- Signal invalidation checks (from Playbook) ---
-        # 1. Price broke below earnings candle low → setup dead ("invalidato se rompe al di sotto")
+        # --- Signal invalidation (from Playbook: "invalidato se rompe al di sotto") ---
+        # Only invalidation: price broke below earnings candle low → setup dead
         if current_price < earnings_low:
             if _sig_debug <= 5:
                 print('[EARNINGS]   -> REJECTED: price < earningsLow')
-            continue
-        # 2. Drift heavily negative (<-3%) → market rejected the surprise
-        if drift_pct < -3:
-            if _sig_debug <= 5:
-                print('[EARNINGS]   -> REJECTED: drift < -3%')
-            continue
-        # 3. Price below pre-earnings close → entire move cancelled
-        if current_price < pre_close:
-            if _sig_debug <= 5:
-                print('[EARNINGS]   -> REJECTED: price < preClose')
             continue
 
         # After 30 days → remove from list (not shown, not marked expired)
@@ -2468,19 +2458,16 @@ def build_earnings_data():
                         if sig['postOpen'] and sig['postOpen'] != 0:
                             sig['driftPct'] = round((cp - sig['postOpen']) / sig['postOpen'] * 100, 2)
                         sig['gapFilled'] = cp < sig['postOpen'] if sig['gapPct'] > 0 else cp > sig['postOpen']
-                        sig['isActive'] = sig['daysSinceEarnings'] < 30 and not sig['gapFilled']
+                        sig['isActive'] = sig['daysSinceEarnings'] < 30 and cp >= sig['earningsLow']
                 print('[EARNINGS] yfinance batch quote updated ' + str(len(price_map)) + ' signals')
         except Exception as e:
             print('[EARNINGS] yfinance batch quote error: ' + str(e))
 
-    # Remove signals invalidated by live prices (re-check after price update)
+    # Remove signals invalidated by live prices (only: price < earnings candle low)
     before_count = len(signals)
-    signals = [s for s in signals
-               if s['currentPrice'] >= s['earningsLow']
-               and s['driftPct'] >= -3
-               and s['currentPrice'] >= s['preClose']]
+    signals = [s for s in signals if s['currentPrice'] >= s['earningsLow']]
     if len(signals) < before_count:
-        print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated after live price update')
+        print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated after live price update (price < earningsLow)')
 
     # --- Step 5: Analyst ratings for signals (yfinance, max 20) ---
     print('[EARNINGS] Step 5: Analyst ratings for signals...')
