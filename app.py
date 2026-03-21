@@ -278,6 +278,8 @@ def api_cot_seasonality():
     dl_avg = []
     bp_min = []
     bp_max = []
+    dl_min = []
+    dl_max = []
     for w in weeks:
         bp_vals = bp_by_week.get(w, [])
         dl_vals = dl_by_week.get(w, [])
@@ -291,10 +293,28 @@ def api_cot_seasonality():
             bp_max.append(None)
         if dl_vals:
             dl_avg.append(round(sum(dl_vals) / len(dl_vals)))
+            dl_min.append(min(dl_vals))
+            dl_max.append(max(dl_vals))
         else:
             dl_avg.append(None)
-    # Current week
+            dl_min.append(None)
+            dl_max.append(None)
+    # Current week and current year data
     current_week = datetime.date.today().isocalendar()[1]
+    current_year = datetime.date.today().year
+    # Extract this year's actual data points mapped to week numbers
+    bp_current_year = [None] * 52
+    dl_current_year = [None] * 52
+    for e in entries:
+        try:
+            dt = datetime.date.fromisoformat(e['date'])
+            if dt.year == current_year:
+                wk = dt.isocalendar()[1]
+                if 1 <= wk <= 52:
+                    bp_current_year[wk - 1] = e['bpNet']
+                    dl_current_year[wk - 1] = e['dlNet']
+        except:
+            continue
     print('[COT] Seasonality for ' + market + ': ' + str(len(entries)) + ' entries, current week ' + str(current_week))
     return jsonify({
         'market': market,
@@ -303,6 +323,10 @@ def api_cot_seasonality():
         'bpMin': bp_min,
         'bpMax': bp_max,
         'dlAvg': dl_avg,
+        'dlMin': dl_min,
+        'dlMax': dl_max,
+        'bpCurrentYear': bp_current_year,
+        'dlCurrentYear': dl_current_year,
         'currentWeek': current_week,
         'yearsOfData': len(set(datetime.date.fromisoformat(e['date']).year for e in entries if e.get('date'))),
     })
