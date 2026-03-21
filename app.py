@@ -2435,6 +2435,17 @@ def build_earnings_data():
         if not pre_close or pre_close == 0:
             continue
 
+        # Playbook: "invalidato se rompe al di sotto" — check if price EVER broke
+        # below earnings candle low at any point after earnings (not just current price)
+        post_earnings_lows = c_low[e_idx + 1:] if e_idx + 1 < len(c_low) else []
+        ever_broke_low = any(low < earnings_low for low in post_earnings_lows)
+        if ever_broke_low:
+            if _sig_debug <= 5:
+                _sig_debug += 1
+                min_low = min(post_earnings_lows) if post_earnings_lows else 0
+                print('[EARNINGS] ' + sym + ': price broke below earningsLow at some point (earningsLow=' + str(round(earnings_low, 2)) + ' minLow=' + str(round(min_low, 2)) + '), skipping')
+            continue
+
         # Playbook: earnings candle must be bullish (close > open = confirmation)
         if c_close[e_idx] <= c_open[e_idx]:
             if _sig_debug <= 5:
@@ -2479,13 +2490,6 @@ def build_earnings_data():
         _sig_debug += 1
         if _sig_debug <= 5:
             print('[EARNINGS] Signal check ' + sym + ': price=' + str(round(current_price, 2)) + ' eLow=' + str(round(earnings_low, 2)) + ' preClose=' + str(round(pre_close, 2)) + ' drift=' + str(drift_pct) + ' gap=' + str(gap_pct) + ' entry=' + str(round(earnings_high, 2)) + ' days=' + str(days_since))
-
-        # --- Signal invalidation (from Playbook: "invalidato se rompe al di sotto") ---
-        # Only invalidation: price broke below earnings candle low → setup dead
-        if current_price < earnings_low:
-            if _sig_debug <= 5:
-                print('[EARNINGS]   -> REJECTED: price < earningsLow')
-            continue
 
         # After 30 days → remove from list (not shown, not marked expired)
         if days_since >= 30:
