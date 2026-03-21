@@ -248,6 +248,65 @@ def api_cot_summary():
         })
     return jsonify({'markets': results, 'categories': FLOW_CATS})
 
+@app.route('/api/cot/seasonality')
+def api_cot_seasonality():
+    """Return seasonal average of BP net position by week-of-year (3-year average)."""
+    market = request.args.get('market', '').upper()
+    if market not in MARKETS:
+        return jsonify({'error': 'Unknown: ' + market}), 400
+    data = load_all_data()
+    if market not in data or not data[market]:
+        return jsonify({'error': 'No data for ' + market}), 404
+    entries = data[market]
+    # Group bpNet and dlNet by ISO week number (1-52)
+    bp_by_week = {}
+    dl_by_week = {}
+    for e in entries:
+        try:
+            dt = datetime.date.fromisoformat(e['date'])
+            wk = dt.isocalendar()[1]  # ISO week 1-52
+            if wk not in bp_by_week:
+                bp_by_week[wk] = []
+                dl_by_week[wk] = []
+            bp_by_week[wk].append(e['bpNet'])
+            dl_by_week[wk].append(e['dlNet'])
+        except:
+            continue
+    # Build weekly averages (weeks 1-52)
+    weeks = list(range(1, 53))
+    bp_avg = []
+    dl_avg = []
+    bp_min = []
+    bp_max = []
+    for w in weeks:
+        bp_vals = bp_by_week.get(w, [])
+        dl_vals = dl_by_week.get(w, [])
+        if bp_vals:
+            bp_avg.append(round(sum(bp_vals) / len(bp_vals)))
+            bp_min.append(min(bp_vals))
+            bp_max.append(max(bp_vals))
+        else:
+            bp_avg.append(None)
+            bp_min.append(None)
+            bp_max.append(None)
+        if dl_vals:
+            dl_avg.append(round(sum(dl_vals) / len(dl_vals)))
+        else:
+            dl_avg.append(None)
+    # Current week
+    current_week = datetime.date.today().isocalendar()[1]
+    print('[COT] Seasonality for ' + market + ': ' + str(len(entries)) + ' entries, current week ' + str(current_week))
+    return jsonify({
+        'market': market,
+        'weeks': weeks,
+        'bpAvg': bp_avg,
+        'bpMin': bp_min,
+        'bpMax': bp_max,
+        'dlAvg': dl_avg,
+        'currentWeek': current_week,
+        'yearsOfData': len(set(datetime.date.fromisoformat(e['date']).year for e in entries if e.get('date'))),
+    })
+
 @app.route('/api/cot/flow')
 def api_flow():
     data = load_all_data()
@@ -1331,12 +1390,51 @@ def api_macro():
             elif not growth_up and inf_rising: regime = 'STAGNATION'
             else: regime = 'SLOWDOWN'
 
+        # --- Regime history (quarterly, last 3 years) ---
+        regime_history = []
+        if len(cpi_yoy_d) >= 12 and len(nfp_v) >= 12:
+            # Align CPI and NFP by finding common monthly dates
+            nfp_map = dict(zip(nfp_d, nfp_v))
+            cpi_map = dict(zip(cpi_yoy_d, cpi_yoy_v))
+            # Build quarterly regime from monthly data (every 3 months)
+            all_months = sorted(set(cpi_yoy_d) & set(nfp_d))
+            for i in range(3, len(all_months)):
+                m = all_months[i]
+                m_prev = all_months[i - 3] if i >= 3 else all_months[0]
+                inf_val = cpi_map.get(m, 0)
+                inf_prev_val = cpi_map.get(m_prev, inf_val)
+                # Average NFP change over last 3 months
+                nfp_slice = [nfp_map.get(all_months[j], 0) for j in range(max(0, i - 2), i + 1) if all_months[j] in nfp_map]
+                nfp_avg_q = sum(nfp_slice) / max(len(nfp_slice), 1) if nfp_slice else 0
+                g_up = nfp_avg_q > 0
+                i_up = inf_val > inf_prev_val
+                if g_up and i_up: rg = 'EXPANSION'
+                elif g_up and not i_up: rg = 'REFLATION'
+                elif not g_up and i_up: rg = 'STAGNATION'
+                else: rg = 'SLOWDOWN'
+                regime_history.append({'date': m, 'regime': rg, 'growth': round(nfp_avg_q), 'inflation': round(inf_val, 2)})
+            # Keep last 36 months max
+            regime_history = regime_history[-36:]
+        print('[MACRO] Regime history: ' + str(len(regime_history)) + ' months, current: ' + regime)
+
+        # --- Regime quadrant coordinates (for scatter plot) ---
+        regime_quadrant = None
+        if cpi_yoy_v and nfp_v:
+            regime_quadrant = {
+                'growthValue': round(nfp_avg) if nfp_avg else 0,
+                'inflationValue': round(cpi_yoy_v[-1], 2) if cpi_yoy_v else 0,
+                'growthLabel': 'NFP 3M Avg',
+                'inflationLabel': 'CPI YoY %',
+            }
+
         last_update = cpi_yoy_d[-1] if cpi_yoy_d else None
 
         return jsonify({
             'status': 'ok',
             'lastUpdate': last_update,
             'regime': regime,
+            'regimeHistory': regime_history,
+            'regimeQuadrant': regime_quadrant,
             'policySwitch': policy,
             'inflation': {
                 'cpiYoY': {'dates': cpi_yoy_d, 'values': cpi_yoy_v},
@@ -3273,6 +3371,61 @@ def build_cointegration():
         }
     return result
 
+def build_vix_spx():
+    """Build VIX vs S&P 500 inverse correlation analysis (1 year daily)."""
+    try:
+        vix = fetch_yf_daily('^VIX', 1)
+        spx = fetch_yf_daily('^GSPC', 1)
+        if not vix['dates'] or not spx['dates']:
+            return None
+        # Align on common dates
+        vix_map = dict(zip(vix['dates'], vix['values']))
+        spx_map = dict(zip(spx['dates'], spx['values']))
+        common = sorted(set(vix['dates']) & set(spx['dates']))
+        if len(common) < 30:
+            return None
+        vix_vals = [vix_map[d] for d in common]
+        spx_vals = [spx_map[d] for d in common]
+        # Rolling 30-day correlation
+        corr_30 = []
+        for i in range(len(common)):
+            if i < 29:
+                corr_30.append(None)
+            else:
+                v_slice = vix_vals[i-29:i+1]
+                s_slice = spx_vals[i-29:i+1]
+                v_mean = sum(v_slice) / 30
+                s_mean = sum(s_slice) / 30
+                cov = sum((v_slice[j] - v_mean) * (s_slice[j] - s_mean) for j in range(30)) / 30
+                v_std = (sum((x - v_mean)**2 for x in v_slice) / 30) ** 0.5
+                s_std = (sum((x - s_mean)**2 for x in s_slice) / 30) ** 0.5
+                corr_30.append(round(cov / (v_std * s_std), 3) if v_std > 0 and s_std > 0 else 0)
+        # VIX regime zones
+        vix_current = vix_vals[-1] if vix_vals else 0
+        if vix_current < 15: vix_regime = 'COMPLACENT'
+        elif vix_current < 20: vix_regime = 'LOW'
+        elif vix_current < 25: vix_regime = 'ELEVATED'
+        elif vix_current < 30: vix_regime = 'HIGH'
+        else: vix_regime = 'EXTREME'
+        # SPX drawdown from 52w high
+        spx_high = max(spx_vals) if spx_vals else 1
+        spx_drawdown = round((spx_vals[-1] - spx_high) / spx_high * 100, 2) if spx_vals else 0
+        print('[CROSSMARKET] VIX-SPX built: ' + str(len(common)) + ' days, VIX=' + str(round(vix_current, 1)) + ' regime=' + vix_regime)
+        return {
+            'dates': common,
+            'vix': [round(v, 2) for v in vix_vals],
+            'spx': [round(v, 2) for v in spx_vals],
+            'correlation30d': corr_30,
+            'currentCorrelation': corr_30[-1] if corr_30 and corr_30[-1] is not None else None,
+            'vixCurrent': round(vix_current, 2),
+            'vixRegime': vix_regime,
+            'spxCurrent': round(spx_vals[-1], 2) if spx_vals else 0,
+            'spxDrawdown': spx_drawdown,
+        }
+    except Exception as e:
+        print('[CROSSMARKET] VIX-SPX error: ' + str(e))
+        return None
+
 @app.route('/api/crossmarket')
 def api_crossmarket():
     try:
@@ -3288,6 +3441,7 @@ def api_crossmarket():
         commodities = build_commodities()
         vg = build_value_growth()
         coint = build_cointegration()
+        vix_spx = build_vix_spx()
 
         result = {
             'status': 'ok',
@@ -3298,7 +3452,8 @@ def api_crossmarket():
             'sectorRotation': sectors,
             'commodities': commodities,
             'valueGrowth': vg,
-            'cointegration': coint
+            'cointegration': coint,
+            'vixSpx': vix_spx
         }
         _cache[ck] = result
         _cache_time[ck] = now
