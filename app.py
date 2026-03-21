@@ -2201,7 +2201,7 @@ def build_earnings_data():
 
     # --- Step 3: Recent earnings with positive surprise (Finnhub calendar → FMP profiles + candles) ---
     print('[EARNINGS] Step 3: Recent earnings (Finnhub calendar)...')
-    recent_from = (today - datetime.timedelta(days=21)).isoformat()
+    recent_from = (today - datetime.timedelta(days=30)).isoformat()
     print('[EARNINGS] Recent from=' + recent_from + ' to=' + today_str)
     recent_cal = fetch_finnhub('calendar/earnings?from=' + recent_from + '&to=' + today_str)
     raw_recent = recent_cal.get('earningsCalendar', []) if isinstance(recent_cal, dict) else []
@@ -2383,7 +2383,7 @@ def build_earnings_data():
             print('[EARNINGS] Signal check ' + sym + ': price=' + str(round(current_price, 2)) + ' eLow=' + str(round(earnings_low, 2)) + ' preClose=' + str(round(pre_close, 2)) + ' drift=' + str(drift_pct) + ' gap=' + str(gap_pct) + ' entry=' + str(round(earnings_high, 2)) + ' days=' + str(days_since))
 
         # --- Signal invalidation checks (from Playbook) ---
-        # 1. Price broke below earnings candle low → setup dead
+        # 1. Price broke below earnings candle low → setup dead ("invalidato se rompe al di sotto")
         if current_price < earnings_low:
             if _sig_debug <= 5:
                 print('[EARNINGS]   -> REJECTED: price < earningsLow')
@@ -2399,7 +2399,11 @@ def build_earnings_data():
                 print('[EARNINGS]   -> REJECTED: price < preClose')
             continue
 
-        is_active = days_since < 30 and not gap_filled
+        # After 30 days → remove from list (not shown, not marked expired)
+        if days_since >= 30:
+            continue
+
+        is_active = True
 
         signals.append({
             'symbol': sym,
@@ -2469,7 +2473,7 @@ def build_earnings_data():
         except Exception as e:
             print('[EARNINGS] yfinance batch quote error: ' + str(e))
 
-    # Remove signals invalidated by live prices
+    # Remove signals invalidated by live prices (re-check after price update)
     before_count = len(signals)
     signals = [s for s in signals
                if s['currentPrice'] >= s['earningsLow']
