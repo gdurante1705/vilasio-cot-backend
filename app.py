@@ -1060,6 +1060,16 @@ def api_liquidity():
         m2 = fetch_fred('M2SL')
         deficit = fetch_fred('MTSDS133FMS')
 
+        # --- SOFR / EFFR spread ---
+        raw_sofr = fetch_fred('SOFR', 2)
+        raw_effr = fetch_fred('EFFR', 2)
+        sofr_map = {o['date']: o['value'] for o in raw_sofr}
+        effr_map = {o['date']: o['value'] for o in raw_effr}
+        sofr_dates = sorted(set(sofr_map.keys()) & set(effr_map.keys()))
+        sofr_vals = [sofr_map[d] for d in sofr_dates]
+        effr_vals = [effr_map[d] for d in sofr_dates]
+        sofr_spread = [round(sofr_map[d] - effr_map[d], 4) for d in sofr_dates]
+
         # --- Net Liquidity: WALCL - TGA - RRP (aligned on WALCL weekly dates) ---
         tga_map = {o['date']: o['value'] for o in tga_raw}
         rrp_map = {o['date']: o['value'] for o in rrp_raw}
@@ -1137,7 +1147,8 @@ def api_liquidity():
             },
             'deficit': {'dates': [o['date'] for o in deficit], 'values': [o['value'] for o in deficit]},
             'sp500': {'dates': sp_dates, 'values': sp_vals},
-            'qeqt': {'dates': qeqt_dates, 'changes': qeqt_chg, 'status': qe_status, 'avgWeekly': round(avg_chg, 2)}
+            'qeqt': {'dates': qeqt_dates, 'changes': qeqt_chg, 'status': qe_status, 'avgWeekly': round(avg_chg, 2)},
+            'sofrEffr': {'dates': sofr_dates, 'sofr': sofr_vals, 'effr': effr_vals, 'spread': sofr_spread}
         })
     except Exception as e:
         print('[LIQUIDITY] ' + str(e))
@@ -1195,6 +1206,9 @@ def api_bonds():
         dff = fetch_fred('DFF')
         upper = fetch_fred('DFEDTARU')
         lower = fetch_fred('DFEDTARL')
+
+        # --- MOVE Index (bond volatility) via yfinance ---
+        move_data = fetch_yf_daily('^MOVE', 2)
 
         # --- Yields: align on DGS10 dates (most complete daily series) ---
         base_dates = [o['date'] for o in dgs10]
@@ -1292,7 +1306,8 @@ def api_bonds():
             },
             'gold': {'dates': gold_dates, 'values': gold_vals},
             'dxy': {'dates': dxy_dates, 'values': dxy_vals},
-            'fomc': fomc
+            'fomc': fomc,
+            'move': move_data
         })
     except Exception as e:
         print('[BONDS] ' + str(e))
