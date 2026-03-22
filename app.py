@@ -3004,54 +3004,62 @@ def api_congressional_refresh():
 # ─── CROSS-MARKET & INTERMARKET ANALYSIS ────────────────────────────────────
 
 def fetch_yf_weekly(symbol, years=2):
-    """Fetch weekly prices from yfinance with caching."""
+    """Fetch weekly prices from yfinance with caching. Never caches empty results."""
+    import time as _time
     ck = 'yf_weekly_' + symbol.replace('=', '').replace('^', '').replace('-', '')
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
     import yfinance as yf
     start = (datetime.date.today() - datetime.timedelta(days=365 * years)).isoformat()
-    try:
-        df = yf.Ticker(symbol).history(start=start, interval='1wk')
-        dates, vals = [], []
-        for idx, row in df.iterrows():
-            dates.append(idx.strftime('%Y-%m-%d'))
-            vals.append(round(float(row['Close']), 4))
-        result = {'dates': dates, 'values': vals}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
-    except Exception as e:
-        print('[YF] ' + symbol + ': ' + str(e))
-        result = {'dates': [], 'values': []}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
+    empty = {'dates': [], 'values': []}
+    for attempt in range(3):
+        try:
+            df = yf.Ticker(symbol).history(start=start, interval='1wk')
+            dates, vals = [], []
+            for idx, row in df.iterrows():
+                dates.append(idx.strftime('%Y-%m-%d'))
+                vals.append(round(float(row['Close']), 4))
+            if dates:
+                result = {'dates': dates, 'values': vals}
+                _cache[ck] = result
+                _cache_time[ck] = now
+                return result
+            print('[YF] ' + symbol + ': empty result, attempt ' + str(attempt + 1))
+        except Exception as e:
+            print('[YF] ' + symbol + ': ' + str(e) + ', attempt ' + str(attempt + 1))
+        if attempt < 2:
+            _time.sleep(2)
+    return empty
 
 def fetch_yf_daily(symbol, years=2):
-    """Fetch daily prices from yfinance with caching."""
+    """Fetch daily prices from yfinance with caching. Never caches empty results."""
+    import time as _time
     ck = 'yf_daily_' + symbol.replace('=', '').replace('^', '').replace('-', '')
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
     import yfinance as yf
     start = (datetime.date.today() - datetime.timedelta(days=365 * years)).isoformat()
-    try:
-        df = yf.Ticker(symbol).history(start=start, interval='1d')
-        dates, vals = [], []
-        for idx, row in df.iterrows():
-            dates.append(idx.strftime('%Y-%m-%d'))
-            vals.append(round(float(row['Close']), 4))
-        result = {'dates': dates, 'values': vals}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
-    except Exception as e:
-        print('[YF] ' + symbol + ': ' + str(e))
-        result = {'dates': [], 'values': []}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
+    empty = {'dates': [], 'values': []}
+    for attempt in range(3):
+        try:
+            df = yf.Ticker(symbol).history(start=start, interval='1d')
+            dates, vals = [], []
+            for idx, row in df.iterrows():
+                dates.append(idx.strftime('%Y-%m-%d'))
+                vals.append(round(float(row['Close']), 4))
+            if dates:
+                result = {'dates': dates, 'values': vals}
+                _cache[ck] = result
+                _cache_time[ck] = now
+                return result
+            print('[YF] ' + symbol + ': empty result, attempt ' + str(attempt + 1))
+        except Exception as e:
+            print('[YF] ' + symbol + ': ' + str(e) + ', attempt ' + str(attempt + 1))
+        if attempt < 2:
+            _time.sleep(2)
+    return empty
 
 def build_status_prices():
     """Fetch latest DXY and EUR/USD for status cards."""
