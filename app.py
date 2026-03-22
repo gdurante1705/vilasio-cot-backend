@@ -2397,6 +2397,7 @@ def build_earnings_data():
     # For each surprise candidate: use universe data (no FMP profile call) + OHLC candles
     signals = []
     _sig_debug = 0
+    _dbg = {'total':len(surprise_candidates),'mcap_ok':0,'candle_ok':0,'eidx_ok':0,'price_valid':0,'bullish':0,'gap_up':0,'days_ok':0,'final':0}
     for item in surprise_candidates:
         sym = item.get('symbol', '')
         earnings_date = item.get('date', '')
@@ -2444,7 +2445,11 @@ def build_earnings_data():
                 mcap = 0
         # Filter market cap $10B-$200B (mid-large cap, no mega cap, no small cap)
         if not mcap or mcap < 10e9 or mcap > 200e9:
+            if _sig_debug < 3:
+                _sig_debug += 1
+                print('[PEAD-DBG] ' + sym + ': mcap=' + str(mcap_str) + ' (' + str(round(mcap/1e9,1)) + 'B) OUTSIDE 10-200B')
             continue
+        _dbg['mcap_ok'] += 1
 
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
         sector_trend_data = market_trend.get(sector_etf, {})
@@ -2461,9 +2466,8 @@ def build_earnings_data():
             import yfinance as yf
             hist = yf.Ticker(sym).history(start=candle_from, end=candle_to)
             if hist is None or hist.empty or len(hist) < 2:
-                if _sig_debug < 5:
-                    print('[EARNINGS] ' + sym + ': no candle data (len=' + str(0 if hist is None or hist.empty else len(hist)) + ')')
                 continue
+            _dbg['candle_ok'] += 1
         except Exception as e:
             print('[EARNINGS] yfinance candle ' + sym + ': ' + str(e))
             continue
@@ -2489,6 +2493,7 @@ def build_earnings_data():
                     break
         if e_idx is None or e_idx < 1:
             continue
+        _dbg['eidx_ok'] += 1
 
         pre_close = c_close[e_idx - 1]
         post_open = c_open[e_idx]
@@ -2502,13 +2507,12 @@ def build_earnings_data():
         # Setup invalidated if CURRENT price is below earnings candle low
         if current_price < earnings_low:
             continue
+        _dbg['price_valid'] += 1
 
         # Playbook: earnings candle must be bullish (close > open = confirmation)
         if c_close[e_idx] <= c_open[e_idx]:
-            if _sig_debug <= 5:
-                _sig_debug += 1
-                print('[EARNINGS] ' + sym + ': bearish earnings candle (close=' + str(round(c_close[e_idx], 2)) + ' <= open=' + str(round(c_open[e_idx], 2)) + '), skipping')
             continue
+        _dbg['bullish'] += 1
 
         earnings_close = c_close[e_idx]
         gap_pct = round((post_open - pre_close) / pre_close * 100, 2)
@@ -2516,6 +2520,7 @@ def build_earnings_data():
         # PEAD requires gap UP — exclude gap down or flat
         if gap_pct <= 0:
             continue
+        _dbg['gap_up'] += 1
 
         drift_pct = round((current_price - earnings_close) / earnings_close * 100, 2) if earnings_close else 0
         days_since = (today - e_dt).days
@@ -2556,6 +2561,7 @@ def build_earnings_data():
         # After 30 days → remove from list (not shown, not marked expired)
         if days_since >= 30:
             continue
+        _dbg['days_ok'] += 1
 
         is_active = True
 
@@ -2590,8 +2596,9 @@ def build_earnings_data():
             'isActive': is_active
         })
 
+    _dbg['final'] = len(signals)
     signals.sort(key=lambda x: abs(x.get('surprisePct', 0)), reverse=True)
-    print('[EARNINGS] Final signals: ' + str(len(signals)))
+    print('[PEAD-DBG] PIPELINE: ' + str(_dbg))
 
     # --- Step 4: Batch quote for current prices via yfinance ---
     active_syms = [s['symbol'] for s in signals if s.get('isActive')]
