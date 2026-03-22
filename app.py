@@ -2519,18 +2519,23 @@ def build_earnings_data():
                 print('[EARNINGS] ' + sym + ': bearish earnings candle (close=' + str(round(c_close[e_idx], 2)) + ' <= open=' + str(round(c_open[e_idx], 2)) + '), skipping')
             continue
 
+        earnings_close = c_close[e_idx]
         gap_pct = round((post_open - pre_close) / pre_close * 100, 2)
-        drift_pct = round((current_price - post_open) / post_open * 100, 2) if post_open else 0
+
+        # PEAD requires gap UP — exclude gap down or flat
+        if gap_pct <= 0:
+            continue
+
+        drift_pct = round((current_price - earnings_close) / earnings_close * 100, 2) if earnings_close else 0
         days_since = (today - e_dt).days
 
         actual_f = float(item.get('epsActual', 0))
         estimate_f = float(item.get('epsEstimate', 1))  # Finnhub field name
         surprise_pct = round((actual_f - estimate_f) / max(abs(estimate_f), 0.01) * 100, 2)
 
-        abs_gap = abs(gap_pct)
-        if abs_gap < 3:
+        if gap_pct < 3:
             gap_type, setup_type = 'small', 'breakout'
-        elif abs_gap < 8:
+        elif gap_pct < 8:
             gap_type, setup_type = 'moderate', 'test'
         else:
             gap_type, setup_type = 'large', 'zone_entry'
@@ -2550,7 +2555,7 @@ def build_earnings_data():
         # Sector hype flag (Playbook: "per le aziende in hype si può evitare la regola dell'S&P500")
         sector_hype = (sector == 'Industrials' or sector_etf == 'XLE')
 
-        gap_filled = current_price < post_open if gap_pct > 0 else current_price > post_open
+        gap_filled = current_price < pre_close
 
         # Debug: log first 5 candidates before invalidation
         _sig_debug += 1
@@ -2580,6 +2585,7 @@ def build_earnings_data():
             'setupType': setup_type,
             'preClose': round(pre_close, 2),
             'postOpen': round(post_open, 2),
+            'earningsClose': round(earnings_close, 2),
             'earningsHigh': round(earnings_high, 2),
             'earningsLow': round(earnings_low, 2),
             'currentPrice': round(current_price, 2),
@@ -2623,9 +2629,10 @@ def build_earnings_data():
                     if sig['symbol'] in price_map and price_map[sig['symbol']]:
                         sig['currentPrice'] = round(price_map[sig['symbol']], 2)
                         cp = sig['currentPrice']
-                        if sig['postOpen'] and sig['postOpen'] != 0:
-                            sig['driftPct'] = round((cp - sig['postOpen']) / sig['postOpen'] * 100, 2)
-                        sig['gapFilled'] = cp < sig['postOpen'] if sig['gapPct'] > 0 else cp > sig['postOpen']
+                        ec = sig.get('earningsClose', sig['postOpen'])
+                        if ec and ec != 0:
+                            sig['driftPct'] = round((cp - ec) / ec * 100, 2)
+                        sig['gapFilled'] = cp < sig['preClose']
                         sig['isActive'] = sig['daysSinceEarnings'] < 30 and cp >= sig['earningsLow']
                 print('[EARNINGS] yfinance batch quote updated ' + str(len(price_map)) + ' signals')
         except Exception as e:
