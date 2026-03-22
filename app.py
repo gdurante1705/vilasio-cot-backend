@@ -2516,11 +2516,19 @@ def build_earnings_data():
 
         earnings_close = c_close[e_idx]
         gap_pct = round((post_open - pre_close) / pre_close * 100, 2)
+        _dbg['gap_up'] += 1  # bullish candle already confirmed above
 
-        # PEAD requires gap UP — exclude gap down or flat
-        if gap_pct <= 0:
-            continue
-        _dbg['gap_up'] += 1
+        # Gap classification: gap UP preferred, bullish candle as fallback
+        if gap_pct > 0:
+            if gap_pct < 3:
+                gap_type, setup_type = 'small', 'breakout'
+            elif gap_pct < 8:
+                gap_type, setup_type = 'moderate', 'test'
+            else:
+                gap_type, setup_type = 'large', 'zone_entry'
+        else:
+            # No gap up but bullish candle confirmed — treat as breakout
+            gap_type, setup_type = 'no_gap', 'breakout'
 
         drift_pct = round((current_price - earnings_close) / earnings_close * 100, 2) if earnings_close else 0
         days_since = (today - e_dt).days
@@ -2528,13 +2536,6 @@ def build_earnings_data():
         actual_f = float(item.get('epsActual', 0))
         estimate_f = float(item.get('epsEstimate', 1))  # Finnhub field name
         surprise_pct = round((actual_f - estimate_f) / max(abs(estimate_f), 0.01) * 100, 2)
-
-        if gap_pct < 3:
-            gap_type, setup_type = 'small', 'breakout'
-        elif gap_pct < 8:
-            gap_type, setup_type = 'moderate', 'test'
-        else:
-            gap_type, setup_type = 'large', 'zone_entry'
 
         # Playbook: zone_entry (gap >8%) → entry at preClose (price returns to pre-gap zone)
         if setup_type == 'zone_entry':
