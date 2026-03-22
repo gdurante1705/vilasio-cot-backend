@@ -2375,10 +2375,14 @@ def build_earnings_data():
 
     # Filter: in universe + positive surprise (Finnhub fields: epsActual, epsEstimate)
     surprise_candidates = []
+    _seen_syms = set()
     for item in raw_recent:
         sym = item.get('symbol', '')
         if sym not in valid_syms:
             continue
+        if sym in _seen_syms:
+            continue
+        _seen_syms.add(sym)
         actual = item.get('epsActual')
         estimate = item.get('epsEstimate')  # Finnhub field name
         if actual is None or estimate is None:
