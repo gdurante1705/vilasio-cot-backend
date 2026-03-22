@@ -147,6 +147,8 @@ def load_all_data():
     return data
 
 def load_price_map(symbol):
+    """Fetch daily price map from yfinance. Never caches empty results."""
+    import time as _time
     ck = 'price_' + symbol
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
@@ -155,17 +157,20 @@ def load_price_map(symbol):
     yf_sym = MARKETS[symbol]["yf"]
     start = (datetime.date.today() - datetime.timedelta(days=365*3+30)).isoformat()
     end = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-    try:
-        df = yf.Ticker(yf_sym).history(start=start, end=end, interval="1d")
-        if df.empty:
-            _cache[ck] = {}; _cache_time[ck] = now; return {}
-        pm = {}
-        for idx, row in df.iterrows():
-            pm[idx.strftime('%Y-%m-%d')] = round(float(row['Close']), 4)
-        _cache[ck] = pm; _cache_time[ck] = now; return pm
-    except Exception as e:
-        print("[PRICE] Error " + yf_sym + ": " + str(e))
-        _cache[ck] = {}; _cache_time[ck] = now; return {}
+    for attempt in range(3):
+        try:
+            df = yf.Ticker(yf_sym).history(start=start, end=end, interval="1d")
+            if not df.empty:
+                pm = {}
+                for idx, row in df.iterrows():
+                    pm[idx.strftime('%Y-%m-%d')] = round(float(row['Close']), 4)
+                _cache[ck] = pm; _cache_time[ck] = now; return pm
+            print("[PRICE] " + yf_sym + ": empty, attempt " + str(attempt + 1))
+        except Exception as e:
+            print("[PRICE] " + yf_sym + ": " + str(e) + ", attempt " + str(attempt + 1))
+        if attempt < 2:
+            _time.sleep(2)
+    return {}
 
 def align_prices(symbol, cot_dates):
     pm = load_price_map(symbol)
@@ -3183,54 +3188,62 @@ def ytd_change(dates, prices):
     return None
 
 def fetch_yf_hourly(symbol, days=30):
-    """Fetch hourly prices from yfinance with caching."""
+    """Fetch hourly prices from yfinance with caching. Never caches empty results."""
+    import time as _time
     ck = 'yf_hourly_' + symbol.replace('=', '').replace('^', '').replace('-', '')
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
     import yfinance as yf
     period = str(min(days, 729)) + 'd'
-    try:
-        df = yf.Ticker(symbol).history(period=period, interval='1h')
-        dates, vals = [], []
-        for idx, row in df.iterrows():
-            dates.append(idx.strftime('%Y-%m-%d %H:%M'))
-            vals.append(round(float(row['Close']), 4))
-        result = {'dates': dates, 'values': vals}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
-    except Exception as e:
-        print('[YF] hourly ' + symbol + ': ' + str(e))
-        result = {'dates': [], 'values': []}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
+    empty = {'dates': [], 'values': []}
+    for attempt in range(3):
+        try:
+            df = yf.Ticker(symbol).history(period=period, interval='1h')
+            dates, vals = [], []
+            for idx, row in df.iterrows():
+                dates.append(idx.strftime('%Y-%m-%d %H:%M'))
+                vals.append(round(float(row['Close']), 4))
+            if dates:
+                result = {'dates': dates, 'values': vals}
+                _cache[ck] = result
+                _cache_time[ck] = now
+                return result
+            print('[YF] hourly ' + symbol + ': empty, attempt ' + str(attempt + 1))
+        except Exception as e:
+            print('[YF] hourly ' + symbol + ': ' + str(e) + ', attempt ' + str(attempt + 1))
+        if attempt < 2:
+            _time.sleep(2)
+    return empty
 
 def fetch_yf_15min(symbol, days=30):
-    """Fetch 15-minute prices from yfinance with caching."""
+    """Fetch 15-minute prices from yfinance with caching. Never caches empty results."""
+    import time as _time
     ck = 'yf_15m_' + symbol.replace('=', '').replace('^', '').replace('-', '')
     now = datetime.datetime.now()
     if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
         return _cache[ck]
     import yfinance as yf
     period = str(min(days, 59)) + 'd'
-    try:
-        df = yf.Ticker(symbol).history(period=period, interval='15m')
-        dates, vals = [], []
-        for idx, row in df.iterrows():
-            dates.append(idx.strftime('%Y-%m-%d %H:%M'))
-            vals.append(round(float(row['Close']), 4))
-        result = {'dates': dates, 'values': vals}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
-    except Exception as e:
-        print('[YF] 15m ' + symbol + ': ' + str(e))
-        result = {'dates': [], 'values': []}
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return result
+    empty = {'dates': [], 'values': []}
+    for attempt in range(3):
+        try:
+            df = yf.Ticker(symbol).history(period=period, interval='15m')
+            dates, vals = [], []
+            for idx, row in df.iterrows():
+                dates.append(idx.strftime('%Y-%m-%d %H:%M'))
+                vals.append(round(float(row['Close']), 4))
+            if dates:
+                result = {'dates': dates, 'values': vals}
+                _cache[ck] = result
+                _cache_time[ck] = now
+                return result
+            print('[YF] 15m ' + symbol + ': empty, attempt ' + str(attempt + 1))
+        except Exception as e:
+            print('[YF] 15m ' + symbol + ': ' + str(e) + ', attempt ' + str(attempt + 1))
+        if attempt < 2:
+            _time.sleep(2)
+    return empty
 
 def compute_strength(pair_data, currencies):
     """Compute currency strength index from pair data. Returns {dates, series, performance}."""
