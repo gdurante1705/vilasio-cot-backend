@@ -1369,6 +1369,12 @@ def api_macro():
         raw_delinq = fetch_fred('DRCCLACBS', 10)      # Credit Card Delinquency Rate (%, quarterly)
         raw_hdtgdp = fetch_fred('HDTGPDUSQ163N', 10)  # Household Debt to GDP (%, quarterly)
 
+        # --- Banking System Health (ETFs via yfinance) ---
+        bank_kbe = fetch_yf_weekly('KBE', 2)    # SPDR S&P Bank ETF (large banks)
+        bank_kre = fetch_yf_weekly('KRE', 2)    # SPDR S&P Regional Banking ETF
+        bank_ixg = fetch_yf_weekly('IXG', 2)    # iShares Global Financials ETF
+        bank_iak = fetch_yf_weekly('IAK', 2)    # iShares U.S. Insurance ETF
+
         # --- YoY & MoM ---
         cpi_yoy_d, cpi_yoy_v = compute_yoy_from_index(cpi)
         ccpi_yoy_d, ccpi_yoy_v = compute_yoy_from_index(core_cpi)
@@ -1492,6 +1498,12 @@ def api_macro():
                 'savingRate': {'dates': [o['date'] for o in raw_psavert], 'values': [o['value'] for o in raw_psavert]},
                 'creditDelinquency': {'dates': [o['date'] for o in raw_delinq], 'values': [o['value'] for o in raw_delinq]},
                 'debtToGdp': {'dates': [o['date'] for o in raw_hdtgdp], 'values': [o['value'] for o in raw_hdtgdp]},
+            },
+            'banking': {
+                'kbe': bank_kbe,
+                'kre': bank_kre,
+                'ixg': bank_ixg,
+                'iak': bank_iak,
             },
         })
     except Exception as e:
