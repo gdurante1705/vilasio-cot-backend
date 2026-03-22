@@ -1369,10 +1369,6 @@ def api_macro():
         raw_delinq = fetch_fred('DRCCLACBS', 10)      # Credit Card Delinquency Rate (%, quarterly)
         raw_hdtgdp = fetch_fred('HDTGPDUSQ163N', 10)  # Household Debt to GDP (%, quarterly)
 
-        # --- PMI / Business Sentiment ---
-        raw_napm = fetch_fred('NAPM', 10)              # ISM Manufacturing PMI (0-100)
-        raw_nmfbai = fetch_fred('NMFBAI', 10)          # ISM Services Business Activity (0-100)
-
         # --- YoY & MoM ---
         cpi_yoy_d, cpi_yoy_v = compute_yoy_from_index(cpi)
         ccpi_yoy_d, ccpi_yoy_v = compute_yoy_from_index(core_cpi)
@@ -1496,10 +1492,6 @@ def api_macro():
                 'savingRate': {'dates': [o['date'] for o in raw_psavert], 'values': [o['value'] for o in raw_psavert]},
                 'creditDelinquency': {'dates': [o['date'] for o in raw_delinq], 'values': [o['value'] for o in raw_delinq]},
                 'debtToGdp': {'dates': [o['date'] for o in raw_hdtgdp], 'values': [o['value'] for o in raw_hdtgdp]},
-            },
-            'pmi': {
-                'manufacturing': {'dates': [o['date'] for o in raw_napm], 'values': [o['value'] for o in raw_napm]},
-                'services': {'dates': [o['date'] for o in raw_nmfbai], 'values': [o['value'] for o in raw_nmfbai]},
             },
         })
     except Exception as e:
