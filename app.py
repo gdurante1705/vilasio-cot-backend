@@ -3343,7 +3343,7 @@ def build_sector_rotation():
     }
     result = []
     for sym, name in etfs.items():
-        data = fetch_yf_daily(sym, 1)
+        data = fetch_yf_daily(sym, 2)
         if not data['dates'] or len(data['values']) < 5:
             continue
         d, v = data['dates'], data['values']
@@ -3352,7 +3352,8 @@ def build_sector_rotation():
             'chg1W': pct_change(v, 5),
             'chg1M': pct_change(v, 21),
             'chg3M': pct_change(v, 63),
-            'chgYTD': ytd_change(d, v)
+            'chgYTD': ytd_change(d, v),
+            'chg1Y': pct_change(v, 252)
         })
     result.sort(key=lambda x: x.get('chg1M') or 0, reverse=True)
     return result
