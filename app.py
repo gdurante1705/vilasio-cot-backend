@@ -2442,10 +2442,8 @@ def build_earnings_data():
                     mcap = float(mcap_str)
             except:
                 mcap = 0
-        # Filter market cap >= 2B (include mid-caps with strong earnings)
-        if mcap and mcap < 2e9:
-            if _sig_debug <= 5:
-                print('[EARNINGS] ' + sym + ': mcap ' + str(mcap_str) + ' below 10B, skipping')
+        # Filter market cap $10B-$200B (mid-large cap, no mega cap, no small cap)
+        if not mcap or mcap < 10e9 or mcap > 200e9:
             continue
 
         sector_etf = SECTOR_ETF_MAP.get(sector, '')
@@ -2501,15 +2499,8 @@ def build_earnings_data():
         if not pre_close or pre_close == 0:
             continue
 
-        # Playbook: "invalidato se rompe al di sotto" — check if price EVER broke
-        # below earnings candle low at any point after earnings (not just current price)
-        post_earnings_lows = c_low[e_idx + 1:] if e_idx + 1 < len(c_low) else []
-        ever_broke_low = any(low < earnings_low for low in post_earnings_lows)
-        if ever_broke_low:
-            if _sig_debug <= 5:
-                _sig_debug += 1
-                min_low = min(post_earnings_lows) if post_earnings_lows else 0
-                print('[EARNINGS] ' + sym + ': price broke below earningsLow at some point (earningsLow=' + str(round(earnings_low, 2)) + ' minLow=' + str(round(min_low, 2)) + '), skipping')
+        # Setup invalidated if CURRENT price is below earnings candle low
+        if current_price < earnings_low:
             continue
 
         # Playbook: earnings candle must be bullish (close > open = confirmation)
