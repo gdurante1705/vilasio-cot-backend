@@ -2762,6 +2762,16 @@ def api_earnings_history():
                         except (ValueError, TypeError):
                             pass
 
+            # Fallback: estimate report date as period + 40 days for unmatched quarters
+            for q in quarters:
+                if not q.get('earningsReportDate') and q.get('date'):
+                    try:
+                        period_dt = datetime.date.fromisoformat(q['date'])
+                        est_report = period_dt + datetime.timedelta(days=40)
+                        q['earningsReportDate'] = est_report.isoformat()
+                    except:
+                        pass
+
             # --- Fetch price data via yfinance for drift calculation ---
             report_dates = []
             MON_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
