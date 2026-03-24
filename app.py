@@ -2373,12 +2373,12 @@ def build_earnings_data():
     if raw_recent:
         print('[EARNINGS] Sample recent item: ' + str(raw_recent[0])[:200])
 
-    # Filter: in universe + positive surprise (Finnhub fields: epsActual, epsEstimate)
+    # Filter: positive surprise — no universe gate; market cap filter downstream ($10B-$200B) ensures quality
     surprise_candidates = []
     _seen_syms = set()
     for item in raw_recent:
         sym = item.get('symbol', '')
-        if sym not in valid_syms:
+        if not sym:
             continue
         if sym in _seen_syms:
             continue
@@ -2396,7 +2396,7 @@ def build_earnings_data():
             continue
         surprise_candidates.append(item)
     surprise_candidates.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
-    print('[EARNINGS] Positive surprises in universe: ' + str(len(surprise_candidates)))
+    print('[EARNINGS] Positive surprises (all symbols): ' + str(len(surprise_candidates)))
 
     # For each surprise candidate: use universe data (no FMP profile call) + OHLC candles
     signals = []
