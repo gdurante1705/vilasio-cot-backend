@@ -2397,6 +2397,10 @@ def build_earnings_data():
         surprise_candidates.append(item)
     surprise_candidates.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
     print('[EARNINGS] Positive surprises (all symbols): ' + str(len(surprise_candidates)))
+    # Cap candidates to avoid OOM on free tier — top 100 by EPS estimate magnitude covers all $10B+ stocks
+    if len(surprise_candidates) > 100:
+        print('[EARNINGS] Capping candidates from ' + str(len(surprise_candidates)) + ' to 100')
+        surprise_candidates = surprise_candidates[:100]
 
     # For each surprise candidate: use universe data (no FMP profile call) + OHLC candles
     signals = []
