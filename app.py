@@ -2709,15 +2709,17 @@ def api_earnings_refresh():
 
 @app.route('/api/earnings/history')
 def api_earnings_history():
-    """Return last 4 quarters of EPS actual vs estimate for a symbol (Finnhub)."""
+    """Return last 4 quarters of EPS actual vs estimate + post-earnings price drift."""
     sym = request.args.get('symbol', '').upper()
     if not sym:
         return jsonify({'status': 'error', 'message': 'Missing symbol parameter'}), 400
     try:
         ck = 'earnings_hist_' + sym
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time.get(ck, now)).total_seconds() < 86400:
+        if ck in _cache and (now - _cache_time.get(ck, now)).total_seconds() < 14400:
             return jsonify(_cache[ck])
+
+        # --- Fetch EPS data from Finnhub ---
         data = fetch_finnhub('stock/earnings?symbol=' + sym)
         quarters = []
         if isinstance(data, list):
@@ -2728,7 +2730,96 @@ def api_earnings_history():
                     'epsEstimate': item.get('estimate'),
                     'surprise': item.get('surprise'),
                     'surprisePercent': item.get('surprisePercent'),
+                    'earningsReportDate': None,
+                    'driftPct': None,
+                    'driftLabel': None,
                 })
+
+        # --- Fetch actual report dates from Finnhub calendar ---
+        if quarters:
+            today = datetime.date.today()
+            cal_from = (today - datetime.timedelta(days=548)).isoformat()
+            cal_to = today.isoformat()
+            cal_data = fetch_finnhub('calendar/earnings?symbol=' + sym + '&from=' + cal_from + '&to=' + cal_to)
+            cal_items = []
+            if isinstance(cal_data, dict):
+                cal_items = cal_data.get('earningsCalendar', [])
+            elif isinstance(cal_data, list):
+                cal_items = cal_data
+
+            # Match calendar entries to quarters by epsActual
+            for q in quarters:
+                qa = q.get('epsActual')
+                if qa is None:
+                    continue
+                for ci in cal_items:
+                    ca = ci.get('epsActual')
+                    if ca is not None:
+                        try:
+                            if abs(float(ca) - float(qa)) < 0.005:
+                                q['earningsReportDate'] = ci.get('date', '')
+                                break
+                        except (ValueError, TypeError):
+                            pass
+
+            # --- Fetch price data via yfinance for drift calculation ---
+            report_dates = []
+            MON_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+            for q in quarters:
+                rd = q.get('earningsReportDate')
+                if rd:
+                    report_dates.append(rd)
+            if report_dates:
+                try:
+                    import yfinance as yf
+                    earliest = min(report_dates)
+                    start_dt = (datetime.date.fromisoformat(earliest) - datetime.timedelta(days=3)).isoformat()
+                    end_dt = (today + datetime.timedelta(days=1)).isoformat()
+                    hist = yf.Ticker(sym).history(start=start_dt, end=end_dt)
+                    # Build date → close price map
+                    price_map = {}
+                    if hist is not None and not hist.empty:
+                        for idx, row in hist.iterrows():
+                            ds = idx.strftime('%Y-%m-%d')
+                            price_map[ds] = float(row['Close'])
+
+                    def find_close(target_date, pm, direction=1):
+                        """Find close price on target_date or nearby trading day."""
+                        dt = datetime.date.fromisoformat(target_date)
+                        for offset in range(5):
+                            ds = (dt + datetime.timedelta(days=offset * direction)).isoformat()
+                            if ds in pm:
+                                return pm[ds], ds
+                        return None, None
+
+                    # Sort quarters chronologically (oldest first) for drift calc
+                    q_sorted = sorted([q for q in quarters if q.get('earningsReportDate')],
+                                      key=lambda x: x['earningsReportDate'])
+                    for i, q in enumerate(q_sorted):
+                        rd = q['earningsReportDate']
+                        e_close, e_date = find_close(rd, price_map, 1)
+                        if e_close is None:
+                            continue
+                        # Drift end: day before next quarter's report date, or today
+                        if i < len(q_sorted) - 1:
+                            next_rd = q_sorted[i + 1]['earningsReportDate']
+                            drift_end_dt = (datetime.date.fromisoformat(next_rd) - datetime.timedelta(days=1)).isoformat()
+                        else:
+                            drift_end_dt = today.isoformat()
+                        d_close, d_date = find_close(drift_end_dt, price_map, -1)
+                        if d_close is None:
+                            continue
+                        drift_pct = round((d_close - e_close) / e_close * 100, 2)
+                        # Format date labels
+                        e_dt = datetime.date.fromisoformat(e_date)
+                        d_dt = datetime.date.fromisoformat(d_date)
+                        e_label = str(e_dt.day) + ' ' + MON_SHORT[e_dt.month - 1]
+                        d_label = str(d_dt.day) + ' ' + MON_SHORT[d_dt.month - 1]
+                        q['driftPct'] = drift_pct
+                        q['driftLabel'] = e_label + ' \u2192 ' + d_label
+                except Exception as e:
+                    print('[EARNINGS] drift calc ' + sym + ': ' + str(e))
+
         result = {'status': 'ok', 'symbol': sym, 'quarters': quarters}
         _cache[ck] = result
         _cache_time[ck] = now
