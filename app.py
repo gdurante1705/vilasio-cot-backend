@@ -2965,8 +2965,9 @@ def build_congressional_data():
             print('[CONGRESS] Finviz ' + option + ': ' + str(len(result)) + ' trades')
         except Exception as e:
             print('[CONGRESS] Finviz ' + option + ' error: ' + str(e))
-        _cache[cache_key] = result
-        _cache_time[cache_key] = _now
+        if result:
+            _cache[cache_key] = result
+            _cache_time[cache_key] = _now
         return result
 
     def _scrape_finviz_insider_url(url, cache_key):
@@ -3010,12 +3011,23 @@ def build_congressional_data():
             print('[CONGRESS] Finviz direct scrape: ' + str(len(result)) + ' trades from ' + url)
         except Exception as e:
             print('[CONGRESS] Finviz direct scrape error: ' + str(e))
-        _cache[cache_key] = result
-        _cache_time[cache_key] = _now
+        if result:
+            _cache[cache_key] = result
+            _cache_time[cache_key] = _now
         return result
 
     insider_latest = _fetch_finviz_insider('latest', 'fvz_insider_latest')
+    if not insider_latest:
+        insider_latest = _scrape_finviz_insider_url(
+            'https://finviz.com/insidertrading.ashx',
+            'fvz_insider_latest_direct'
+        )
     insider_top_week = _fetch_finviz_insider('top week', 'fvz_insider_topweek')
+    if not insider_top_week:
+        insider_top_week = _scrape_finviz_insider_url(
+            'https://finviz.com/insidertrading.ashx?tc=7&o=-transactionvalue',
+            'fvz_insider_topweek_direct'
+        )
     insider_top_owner = _fetch_finviz_insider('top owner week', 'fvz_insider_topowner')
     if not insider_top_owner:
         insider_top_owner = _scrape_finviz_insider_url(
