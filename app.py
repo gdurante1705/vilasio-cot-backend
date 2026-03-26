@@ -3661,6 +3661,55 @@ def build_vix_spx():
         print('[CROSSMARKET] VIX-SPX error: ' + str(e))
         return None
 
+def _batch_prefetch_yf():
+    """Pre-fetch all yfinance symbols needed by crossmarket in one batch call.
+    Populates the individual caches so build_* functions hit cache."""
+    import time as _t
+    t0 = _t.time()
+    # Collect all symbols needed
+    daily_syms = [
+        'DX-Y.NYB', 'EURUSD=X',  # status
+        '^GSPC', 'GC=F', '^TNX', 'CL=F', 'BTC-USD',  # correlation
+        'GBPUSD=X', 'USDJPY=X', 'AUDUSD=X', 'USDCAD=X', 'USDCHF=X', 'NZDUSD=X',  # currency
+        'EURGBP=X', 'EURJPY=X', 'GBPJPY=X', 'AUDJPY=X', 'CADJPY=X',
+        'XLK', 'XLF', 'XLE', 'XLV', 'XLU', 'XLP', 'XLRE', 'XLB', 'XLY', 'XLI', 'XLC',  # sectors
+        'SI=F', 'NG=F', 'HG=F', 'ZC=F', 'ZS=F',  # commodities
+        'IWF', 'IWD', '^VIX',  # value/growth, vix
+    ]
+    # Check how many are already cached
+    uncached = []
+    now = datetime.datetime.now()
+    for sym in daily_syms:
+        ck = 'yf_daily_' + sym.replace('=', '').replace('^', '').replace('-', '')
+        if ck not in _cache or (now - _cache_time.get(ck, now)).total_seconds() >= CACHE_TTL:
+            uncached.append(sym)
+    if not uncached:
+        print('[CROSSMARKET] All symbols cached, skip batch prefetch')
+        return
+    print('[CROSSMARKET] Batch prefetch: ' + str(len(uncached)) + ' uncached symbols')
+    try:
+        import yfinance as yf
+        start = (datetime.date.today() - datetime.timedelta(days=365 * 2)).isoformat()
+        df = yf.download(uncached, start=start, interval='1d', auto_adjust=True, progress=False, threads=True)
+        if df is not None and not df.empty:
+            for sym in uncached:
+                ck = 'yf_daily_' + sym.replace('=', '').replace('^', '').replace('-', '')
+                try:
+                    if len(uncached) == 1:
+                        close = df['Close'].dropna()
+                    else:
+                        close = df['Close'][sym].dropna() if sym in df['Close'].columns else None
+                    if close is not None and len(close) > 0:
+                        dates = [idx.strftime('%Y-%m-%d') for idx in close.index]
+                        vals = [round(float(v), 4) for v in close.values]
+                        _cache[ck] = {'dates': dates, 'values': vals}
+                        _cache_time[ck] = now
+                except Exception:
+                    pass
+            print('[CROSSMARKET] Batch prefetch done in ' + str(round(_t.time() - t0, 1)) + 's')
+    except Exception as e:
+        print('[CROSSMARKET] Batch prefetch error: ' + str(e))
+
 @app.route('/api/crossmarket')
 def api_crossmarket():
     try:
@@ -3669,6 +3718,7 @@ def api_crossmarket():
         if ck in _cache and (now - _cache_time[ck]).total_seconds() < 10800:
             return jsonify(_cache[ck])
 
+        _batch_prefetch_yf()
         status_prices = build_status_prices()
         corr = build_correlation_matrix()
         currency = build_currency_strength()
