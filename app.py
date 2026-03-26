@@ -3693,38 +3693,39 @@ def _batch_prefetch_yf():
                 uncached.append(sym)
         if not uncached:
             return
-        print('[CROSSMARKET] Batch ' + prefix + ': ' + str(len(uncached)) + ' symbols')
-        try:
-            import yfinance as yf
-            if interval == '1wk':
-                start = (datetime.date.today() - datetime.timedelta(days=period_days)).isoformat()
-                df = yf.download(uncached, start=start, interval=interval, auto_adjust=True, progress=False, threads=True)
-            elif interval in ('1h', '15m'):
-                df = yf.download(uncached, period=str(min(period_days, 729 if interval == '1h' else 59)) + 'd', interval=interval, auto_adjust=True, progress=False, threads=True)
-            else:
-                start = (datetime.date.today() - datetime.timedelta(days=period_days)).isoformat()
-                df = yf.download(uncached, start=start, interval=interval, auto_adjust=True, progress=False, threads=True)
-            if df is not None and not df.empty:
-                for sym in uncached:
-                    ck = prefix + sym.replace('=', '').replace('^', '').replace('-', '')
-                    try:
-                        if len(uncached) == 1:
-                            close = df['Close'].dropna()
-                        else:
-                            close = df['Close'][sym].dropna() if sym in df['Close'].columns else None
-                        if close is not None and len(close) > 0:
-                            if interval in ('1h', '15m'):
-                                dates = [idx.strftime('%Y-%m-%d %H:%M') for idx in close.index]
+        import yfinance as yf
+        # Process in chunks of 8 to limit RAM usage
+        chunk_size = 8
+        for ci in range(0, len(uncached), chunk_size):
+            chunk = uncached[ci:ci+chunk_size]
+            print('[CROSSMARKET] Batch ' + prefix + ': chunk ' + str(ci//chunk_size+1) + ' (' + str(len(chunk)) + ' syms)')
+            try:
+                if interval in ('1h', '15m'):
+                    df = yf.download(chunk, period=str(min(period_days, 729 if interval == '1h' else 59)) + 'd', interval=interval, auto_adjust=True, progress=False, threads=True)
+                else:
+                    start = (datetime.date.today() - datetime.timedelta(days=period_days)).isoformat()
+                    df = yf.download(chunk, start=start, interval=interval, auto_adjust=True, progress=False, threads=True)
+                if df is not None and not df.empty:
+                    for sym in chunk:
+                        ck = prefix + sym.replace('=', '').replace('^', '').replace('-', '')
+                        try:
+                            if len(chunk) == 1:
+                                close = df['Close'].dropna()
                             else:
-                                dates = [idx.strftime('%Y-%m-%d') for idx in close.index]
-                            vals = [round(float(v), 4) for v in close.values]
-                            _cache[ck] = {'dates': dates, 'values': vals}
-                            _cache_time[ck] = now
-                    except Exception:
-                        pass
-                print('[CROSSMARKET] Batch ' + prefix + ' done')
-        except Exception as e:
-            print('[CROSSMARKET] Batch ' + prefix + ' error: ' + str(e))
+                                close = df['Close'][sym].dropna() if sym in df['Close'].columns else None
+                            if close is not None and len(close) > 0:
+                                if interval in ('1h', '15m'):
+                                    dates = [idx.strftime('%Y-%m-%d %H:%M') for idx in close.index]
+                                else:
+                                    dates = [idx.strftime('%Y-%m-%d') for idx in close.index]
+                                vals = [round(float(v), 4) for v in close.values]
+                                _cache[ck] = {'dates': dates, 'values': vals}
+                                _cache_time[ck] = now
+                        except Exception:
+                            pass
+                del df  # Free memory
+            except Exception as e:
+                print('[CROSSMARKET] Batch ' + prefix + ' chunk error: ' + str(e))
 
     _batch_dl(daily_syms, '1d', 730, 'yf_daily_')
     _batch_dl(weekly_syms, '1wk', 730, 'yf_weekly_')
@@ -4021,29 +4022,8 @@ def api_geopolitical_refresh():
 import threading as _threading
 import time as _time
 
-def _prewarm_cache():
-    """Pre-warm only the heaviest endpoints. Others warm on first UptimeRobot ping."""
-    _time.sleep(30)  # Wait for server to be fully stable
-    print('[PREWARM] Starting cache pre-warm (heavy endpoints only)...')
-    try:
-        print('[PREWARM] Warming crossmarket...')
-        with app.test_client() as c:
-            resp = c.get('/api/crossmarket')
-            print('[PREWARM] crossmarket done (status ' + str(resp.status_code) + ')')
-    except Exception as e:
-        print('[PREWARM] crossmarket error: ' + str(e))
-    _time.sleep(45)
-    try:
-        print('[PREWARM] Warming earnings...')
-        with app.test_client() as c:
-            resp = c.get('/api/earnings')
-            print('[PREWARM] earnings done (status ' + str(resp.status_code) + ')')
-    except Exception as e:
-        print('[PREWARM] earnings error: ' + str(e))
-    print('[PREWARM] Done. Other endpoints warm on first request.')
-
-# Start prewarm thread (works with both gunicorn and direct run)
-_threading.Thread(target=_prewarm_cache, daemon=True).start()
+# No prewarm thread — caches warm organically on first request.
+# UptimeRobot pings keep the server alive and trigger cache warming.
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
