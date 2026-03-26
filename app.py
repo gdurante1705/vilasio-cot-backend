@@ -4022,22 +4022,25 @@ import threading as _threading
 import time as _time
 
 def _prewarm_cache():
-    """Pre-warm critical caches in background on startup."""
-    _time.sleep(8)  # Wait for server to be ready
-    print('[PREWARM] Starting cache pre-warm...')
-    endpoints = [
-        'geopolitical', 'congressional', 'earnings',
-        'liquidity', 'bonds', 'macro', 'crossmarket',
-    ]
-    for name in endpoints:
-        try:
-            print('[PREWARM] Warming ' + name + '...')
-            with app.test_client() as c:
-                resp = c.get('/api/' + name)
-                print('[PREWARM] ' + name + ' done (status ' + str(resp.status_code) + ')')
-        except Exception as e:
-            print('[PREWARM] ' + name + ' error: ' + str(e))
-    print('[PREWARM] All caches warmed.')
+    """Pre-warm only the heaviest endpoints. Others warm on first UptimeRobot ping."""
+    _time.sleep(30)  # Wait for server to be fully stable
+    print('[PREWARM] Starting cache pre-warm (heavy endpoints only)...')
+    try:
+        print('[PREWARM] Warming crossmarket...')
+        with app.test_client() as c:
+            resp = c.get('/api/crossmarket')
+            print('[PREWARM] crossmarket done (status ' + str(resp.status_code) + ')')
+    except Exception as e:
+        print('[PREWARM] crossmarket error: ' + str(e))
+    _time.sleep(45)
+    try:
+        print('[PREWARM] Warming earnings...')
+        with app.test_client() as c:
+            resp = c.get('/api/earnings')
+            print('[PREWARM] earnings done (status ' + str(resp.status_code) + ')')
+    except Exception as e:
+        print('[PREWARM] earnings error: ' + str(e))
+    print('[PREWARM] Done. Other endpoints warm on first request.')
 
 # Start prewarm thread (works with both gunicorn and direct run)
 _threading.Thread(target=_prewarm_cache, daemon=True).start()
