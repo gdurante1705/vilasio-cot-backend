@@ -3662,53 +3662,75 @@ def build_vix_spx():
         return None
 
 def _batch_prefetch_yf():
-    """Pre-fetch all yfinance symbols needed by crossmarket in one batch call.
+    """Pre-fetch all yfinance symbols needed by crossmarket in batch calls.
     Populates the individual caches so build_* functions hit cache."""
     import time as _t
     t0 = _t.time()
-    # Collect all symbols needed
-    daily_syms = [
-        'DX-Y.NYB', 'EURUSD=X',  # status
-        '^GSPC', 'GC=F', '^TNX', 'CL=F', 'BTC-USD',  # correlation
-        'GBPUSD=X', 'USDJPY=X', 'AUDUSD=X', 'USDCAD=X', 'USDCHF=X', 'NZDUSD=X',  # currency
-        'EURGBP=X', 'EURJPY=X', 'GBPJPY=X', 'AUDJPY=X', 'CADJPY=X',
-        'XLK', 'XLF', 'XLE', 'XLV', 'XLU', 'XLP', 'XLRE', 'XLB', 'XLY', 'XLI', 'XLC',  # sectors
-        'SI=F', 'NG=F', 'HG=F', 'ZC=F', 'ZS=F',  # commodities
-        'IWF', 'IWD', '^VIX',  # value/growth, vix
-    ]
-    # Check how many are already cached
-    uncached = []
     now = datetime.datetime.now()
-    for sym in daily_syms:
-        ck = 'yf_daily_' + sym.replace('=', '').replace('^', '').replace('-', '')
-        if ck not in _cache or (now - _cache_time.get(ck, now)).total_seconds() >= CACHE_TTL:
-            uncached.append(sym)
-    if not uncached:
-        print('[CROSSMARKET] All symbols cached, skip batch prefetch')
-        return
-    print('[CROSSMARKET] Batch prefetch: ' + str(len(uncached)) + ' uncached symbols')
-    try:
-        import yfinance as yf
-        start = (datetime.date.today() - datetime.timedelta(days=365 * 2)).isoformat()
-        df = yf.download(uncached, start=start, interval='1d', auto_adjust=True, progress=False, threads=True)
-        if df is not None and not df.empty:
-            for sym in uncached:
-                ck = 'yf_daily_' + sym.replace('=', '').replace('^', '').replace('-', '')
-                try:
-                    if len(uncached) == 1:
-                        close = df['Close'].dropna()
-                    else:
-                        close = df['Close'][sym].dropna() if sym in df['Close'].columns else None
-                    if close is not None and len(close) > 0:
-                        dates = [idx.strftime('%Y-%m-%d') for idx in close.index]
-                        vals = [round(float(v), 4) for v in close.values]
-                        _cache[ck] = {'dates': dates, 'values': vals}
-                        _cache_time[ck] = now
-                except Exception:
-                    pass
-            print('[CROSSMARKET] Batch prefetch done in ' + str(round(_t.time() - t0, 1)) + 's')
-    except Exception as e:
-        print('[CROSSMARKET] Batch prefetch error: ' + str(e))
+
+    # All symbols needed across all intervals
+    daily_syms = [
+        'DX-Y.NYB', 'EURUSD=X', '^GSPC', 'GC=F', '^TNX', 'CL=F', 'BTC-USD',
+        'GBPUSD=X', 'USDJPY=X', 'AUDUSD=X', 'USDCAD=X', 'USDCHF=X', 'NZDUSD=X',
+        'EURGBP=X', 'EURJPY=X', 'GBPJPY=X', 'AUDJPY=X', 'CADJPY=X',
+        'XLK', 'XLF', 'XLE', 'XLV', 'XLU', 'XLP', 'XLRE', 'XLB', 'XLY', 'XLI', 'XLC',
+        'SI=F', 'NG=F', 'HG=F', 'ZC=F', 'ZS=F', 'PL=F', 'PA=F',
+        'IWF', 'IWD', '^VIX', '^NDX', '^RUT', '^DJI', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'BNB-USD',
+    ]
+    hourly_syms = [
+        'EURUSD=X', 'GBPUSD=X', 'USDJPY=X', 'AUDUSD=X', 'USDCAD=X', 'USDCHF=X',
+        'NZDUSD=X', 'EURGBP=X', 'EURJPY=X', 'GBPJPY=X', 'AUDJPY=X', 'CADJPY=X',
+        'GC=F', 'SI=F', 'PL=F', 'HG=F', 'PA=F', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'BNB-USD',
+    ]
+    weekly_syms = ['GC=F', 'SI=F', 'CL=F', 'NG=F', 'HG=F', 'ZC=F', 'ZS=F', 'IWD', 'IWF']
+    m15_syms = ['^GSPC', '^NDX', '^RUT', '^DJI']
+
+    def _batch_dl(syms, interval, period_days, prefix):
+        uncached = []
+        for sym in syms:
+            ck = prefix + sym.replace('=', '').replace('^', '').replace('-', '')
+            if ck not in _cache or (now - _cache_time.get(ck, now)).total_seconds() >= CACHE_TTL:
+                uncached.append(sym)
+        if not uncached:
+            return
+        print('[CROSSMARKET] Batch ' + prefix + ': ' + str(len(uncached)) + ' symbols')
+        try:
+            import yfinance as yf
+            if interval == '1wk':
+                start = (datetime.date.today() - datetime.timedelta(days=period_days)).isoformat()
+                df = yf.download(uncached, start=start, interval=interval, auto_adjust=True, progress=False, threads=True)
+            elif interval in ('1h', '15m'):
+                df = yf.download(uncached, period=str(min(period_days, 729 if interval == '1h' else 59)) + 'd', interval=interval, auto_adjust=True, progress=False, threads=True)
+            else:
+                start = (datetime.date.today() - datetime.timedelta(days=period_days)).isoformat()
+                df = yf.download(uncached, start=start, interval=interval, auto_adjust=True, progress=False, threads=True)
+            if df is not None and not df.empty:
+                for sym in uncached:
+                    ck = prefix + sym.replace('=', '').replace('^', '').replace('-', '')
+                    try:
+                        if len(uncached) == 1:
+                            close = df['Close'].dropna()
+                        else:
+                            close = df['Close'][sym].dropna() if sym in df['Close'].columns else None
+                        if close is not None and len(close) > 0:
+                            if interval in ('1h', '15m'):
+                                dates = [idx.strftime('%Y-%m-%d %H:%M') for idx in close.index]
+                            else:
+                                dates = [idx.strftime('%Y-%m-%d') for idx in close.index]
+                            vals = [round(float(v), 4) for v in close.values]
+                            _cache[ck] = {'dates': dates, 'values': vals}
+                            _cache_time[ck] = now
+                    except Exception:
+                        pass
+                print('[CROSSMARKET] Batch ' + prefix + ' done')
+        except Exception as e:
+            print('[CROSSMARKET] Batch ' + prefix + ' error: ' + str(e))
+
+    _batch_dl(daily_syms, '1d', 730, 'yf_daily_')
+    _batch_dl(weekly_syms, '1wk', 730, 'yf_weekly_')
+    _batch_dl(hourly_syms, '1h', 30, 'yf_hourly_')
+    _batch_dl(m15_syms, '15m', 30, 'yf_15m_')
+    print('[CROSSMARKET] All batch prefetch done in ' + str(round(_t.time() - t0, 1)) + 's')
 
 @app.route('/api/crossmarket')
 def api_crossmarket():
