@@ -1049,6 +1049,10 @@ def nearest_val(lookup, dt_str, max_days=7):
 def api_liquidity():
     if not FRED_API_KEY:
         return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
+    ck_liq = 'liquidity_main'
+    now = datetime.datetime.now()
+    if ck_liq in _cache and (now - _cache_time[ck_liq]).total_seconds() < 3600:
+        return jsonify(_cache[ck_liq])
     try:
         walcl = fetch_fred('WALCL')
         tga_raw = fetch_fred('WTREGEN')
@@ -1132,7 +1136,7 @@ def api_liquidity():
 
         last_update = nl_dates[-1] if nl_dates else None
 
-        return jsonify({
+        result_liq = {
             'status': 'ok',
             'lastUpdate': last_update,
             'netLiquidity': {'dates': nl_dates, 'walcl': nl_walcl, 'tga': nl_tga, 'rrp': nl_rrp, 'netLiq': nl_net},
@@ -1149,7 +1153,10 @@ def api_liquidity():
             'sp500': {'dates': sp_dates, 'values': sp_vals},
             'qeqt': {'dates': qeqt_dates, 'changes': qeqt_chg, 'status': qe_status, 'avgWeekly': round(avg_chg, 2)},
             'sofrEffr': {'dates': sofr_dates, 'sofr': sofr_vals, 'effr': effr_vals, 'spread': sofr_spread}
-        })
+        }
+        _cache[ck_liq] = result_liq
+        _cache_time[ck_liq] = now
+        return jsonify(result_liq)
     except Exception as e:
         print('[LIQUIDITY] ' + str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1190,6 +1197,10 @@ def align_on_dates(base_dates, series_map):
 def api_bonds():
     if not FRED_API_KEY:
         return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
+    ck_bonds = 'bonds_main'
+    now = datetime.datetime.now()
+    if ck_bonds in _cache and (now - _cache_time[ck_bonds]).total_seconds() < 3600:
+        return jsonify(_cache[ck_bonds])
     try:
         # --- Fetch all series ---
         dgs2 = fetch_fred('DGS2')
@@ -1277,7 +1288,7 @@ def api_bonds():
 
         last_update = base_dates[-1] if base_dates else None
 
-        return jsonify({
+        result_bonds = {
             'status': 'ok',
             'lastUpdate': last_update,
             'yields': {
@@ -1308,7 +1319,10 @@ def api_bonds():
             'dxy': {'dates': dxy_dates, 'values': dxy_vals},
             'fomc': fomc,
             'move': move_data
-        })
+        }
+        _cache[ck_bonds] = result_bonds
+        _cache_time[ck_bonds] = now
+        return jsonify(result_bonds)
     except Exception as e:
         print('[BONDS] ' + str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1370,6 +1384,10 @@ def morpheus_rank(values, lookback):
 
 @app.route('/api/macro')
 def api_macro():
+    ck_macro = 'macro_main'
+    now_m = datetime.datetime.now()
+    if ck_macro in _cache and (now_m - _cache_time[ck_macro]).total_seconds() < 3600:
+        return jsonify(_cache[ck_macro])
     if not FRED_API_KEY:
         return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
     try:
@@ -1484,7 +1502,7 @@ def api_macro():
 
         last_update = cpi_yoy_d[-1] if cpi_yoy_d else None
 
-        return jsonify({
+        result_macro = {
             'status': 'ok',
             'lastUpdate': last_update,
             'regime': regime,
@@ -1525,7 +1543,10 @@ def api_macro():
                 'ixg': bank_ixg,
                 'iak': bank_iak,
             },
-        })
+        }
+        _cache[ck_macro] = result_macro
+        _cache_time[ck_macro] = now_m
+        return jsonify(result_macro)
     except Exception as e:
         print('[MACRO] ' + str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -2685,7 +2706,7 @@ def api_earnings():
     try:
         ck = 'earnings_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 7200:
             return jsonify(_cache[ck])
         data = build_earnings_data()
         result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
@@ -3645,7 +3666,7 @@ def api_crossmarket():
     try:
         ck = 'crossmarket_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 3600:
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 10800:
             return jsonify(_cache[ck])
 
         status_prices = build_status_prices()
@@ -3924,6 +3945,30 @@ def api_geopolitical_refresh():
     print('[GPR] Cache cleared')
     return api_geopolitical()
 
+
+import threading as _threading
+import time as _time
+
+def _prewarm_cache():
+    """Pre-warm critical caches in background on startup."""
+    _time.sleep(8)  # Wait for server to be ready
+    print('[PREWARM] Starting cache pre-warm...')
+    endpoints = [
+        'geopolitical', 'congressional', 'earnings',
+        'liquidity', 'bonds', 'macro', 'crossmarket',
+    ]
+    for name in endpoints:
+        try:
+            print('[PREWARM] Warming ' + name + '...')
+            with app.test_client() as c:
+                resp = c.get('/api/' + name)
+                print('[PREWARM] ' + name + ' done (status ' + str(resp.status_code) + ')')
+        except Exception as e:
+            print('[PREWARM] ' + name + ' error: ' + str(e))
+    print('[PREWARM] All caches warmed.')
+
+# Start prewarm thread (works with both gunicorn and direct run)
+_threading.Thread(target=_prewarm_cache, daemon=True).start()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
