@@ -79,6 +79,15 @@ _cache = {}
 _cache_time = {}
 CACHE_TTL = 3600 * 6
 
+# ── Per-endpoint cache TTLs (aggressive caching for perceived speed) ──────
+CACHE_TTL_COT = 3600            # 1h — guarantees freshness post-CFTC release
+CACHE_TTL_CROSSMARKET = 3600    # 1h — yfinance data
+CACHE_TTL_EARNINGS = 1800       # 30min — but PEAD pre-computed in background
+CACHE_TTL_CONGRESSIONAL = 1800  # 30min
+CACHE_TTL_MACRO = 3600          # 1h
+CACHE_TTL_BONDS = 3600          # 1h
+CACHE_TTL_LIQUIDITY = 3600      # 1h
+
 def fetch_json(url, params=None):
     if params: url = url + '?' + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={'User-Agent': 'Vilasio/3.5', 'Accept': 'application/json'})
@@ -127,7 +136,7 @@ def fetch_market_data(symbol):
 def load_all_data():
     now = datetime.datetime.now()
     ck = 'cot_v35'
-    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL:
+    if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_COT:
         return _cache[ck]
     print("[COT] Loading all " + str(len(MARKETS)) + " markets...")
     data = {}
@@ -251,7 +260,8 @@ def api_cot_summary():
             'oi': last['oi'], 'oiChg': last['oi'] - prev['oi'],
             'reportDate': last['date']
         })
-    return jsonify({'markets': results, 'categories': FLOW_CATS})
+    latest_report_date = max((m['reportDate'] for m in results if m.get('reportDate')), default=None)
+    return jsonify({'latestReportDate': latest_report_date, 'markets': results, 'categories': FLOW_CATS})
 
 @app.route('/api/cot/seasonality')
 def api_cot_seasonality():
@@ -1051,7 +1061,7 @@ def api_liquidity():
         return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
     ck_liq = 'liquidity_main'
     now = datetime.datetime.now()
-    if ck_liq in _cache and (now - _cache_time[ck_liq]).total_seconds() < 3600:
+    if ck_liq in _cache and (now - _cache_time[ck_liq]).total_seconds() < CACHE_TTL_LIQUIDITY:
         return jsonify(_cache[ck_liq])
     try:
         walcl = fetch_fred('WALCL')
@@ -1199,7 +1209,7 @@ def api_bonds():
         return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
     ck_bonds = 'bonds_main'
     now = datetime.datetime.now()
-    if ck_bonds in _cache and (now - _cache_time[ck_bonds]).total_seconds() < 3600:
+    if ck_bonds in _cache and (now - _cache_time[ck_bonds]).total_seconds() < CACHE_TTL_BONDS:
         return jsonify(_cache[ck_bonds])
     try:
         # --- Fetch all series ---
@@ -1386,7 +1396,7 @@ def morpheus_rank(values, lookback):
 def api_macro():
     ck_macro = 'macro_main'
     now_m = datetime.datetime.now()
-    if ck_macro in _cache and (now_m - _cache_time[ck_macro]).total_seconds() < 3600:
+    if ck_macro in _cache and (now_m - _cache_time[ck_macro]).total_seconds() < CACHE_TTL_MACRO:
         return jsonify(_cache[ck_macro])
     if not FRED_API_KEY:
         return jsonify({'status': 'error', 'message': 'FRED_API_KEY not set'}), 500
@@ -2706,14 +2716,21 @@ def api_earnings():
     try:
         ck = 'earnings_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 7200:
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_EARNINGS:
             return jsonify(_cache[ck])
-        data = build_earnings_data()
-        result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
-        result.update(data)
-        _cache[ck] = result
-        _cache_time[ck] = now
-        return jsonify(result)
+        # If cache is empty (first startup), return placeholder while background computes
+        if ck not in _cache:
+            return jsonify({
+                'status': 'initializing',
+                'message': 'Scanner initializing, check back in 2 minutes',
+                'upcoming': [],
+                'signals': [],
+                'marketTrend': {},
+                'lastUpdate': datetime.date.today().isoformat()
+            })
+        # Cache expired — refresh in background, return stale data
+        _threading.Thread(target=_refresh_pead_cache, daemon=True).start()
+        return jsonify(_cache[ck])
     except Exception as e:
         print('[EARNINGS] ' + str(e))
         import traceback; traceback.print_exc()
@@ -3145,7 +3162,7 @@ def api_congressional():
     try:
         ck = 'congressional_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 21600:  # 6h cache
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_CONGRESSIONAL:
             return jsonify(_cache[ck])
         data = build_congressional_data()
         result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
@@ -3738,7 +3755,7 @@ def api_crossmarket():
     try:
         ck = 'crossmarket_main'
         now = datetime.datetime.now()
-        if ck in _cache and (now - _cache_time[ck]).total_seconds() < 10800:
+        if ck in _cache and (now - _cache_time[ck]).total_seconds() < CACHE_TTL_CROSSMARKET:
             return jsonify(_cache[ck])
 
         _batch_prefetch_yf()
@@ -4022,8 +4039,38 @@ def api_geopolitical_refresh():
 import threading as _threading
 import time as _time
 
-# No prewarm thread — caches warm organically on first request.
-# UptimeRobot pings keep the server alive and trigger cache warming.
+# ── PEAD BACKGROUND REFRESH: pre-compute every 6h so /api/earnings is instant ──
+# No prewarm thread — caches warm on first request (avoids OOM on Render 512MB).
+# UptimeRobot pings keep the server alive and organically warm the caches.
+
+_PEAD_REFRESH_INTERVAL = 21600  # 6 hours
+
+def _refresh_pead_cache():
+    """Compute PEAD scanner and cache the result. Called by the periodic thread."""
+    try:
+        data = build_earnings_data()
+        result = {'status': 'ok', 'lastUpdate': datetime.date.today().isoformat()}
+        result.update(data)
+        _cache['earnings_main'] = result
+        _cache_time['earnings_main'] = datetime.datetime.now()
+        print('[PEAD-BG] Cache refreshed: ' + str(len(data.get('signals', []))) + ' signals, ' + str(len(data.get('upcoming', []))) + ' upcoming')
+    except Exception as e:
+        print('[PEAD-BG] Refresh error: ' + str(e))
+
+
+def _pead_refresh_loop():
+    """Refresh PEAD scanner every 6 hours. Sleeps between cycles — negligible RAM."""
+    _time.sleep(300)  # 5min initial delay: let server settle before first heavy compute
+    while True:
+        try:
+            print('[PEAD-BG] Starting refresh...')
+            _refresh_pead_cache()
+        except Exception as e:
+            print('[PEAD-BG] Loop error: ' + str(e))
+        _time.sleep(_PEAD_REFRESH_INTERVAL)
+
+
+_threading.Thread(target=_pead_refresh_loop, daemon=True).start()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
