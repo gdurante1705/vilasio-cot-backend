@@ -2162,7 +2162,7 @@ def get_stock_universe():
     }
     for sym in _SP500:
         profiles[sym] = {'name': sym, 'sector': '', 'marketCap': 0}
-    print('[EARNINGS] Hardcoded S&P 500 universe: ' + str(len(profiles)) + ' stocks')
+    print('[EARNINGS] Hardcoded S&P 500 universe: ' + str(len(profiles)) + ' stocks', flush=True)
     _cache[ck] = profiles
     _cache_time[ck] = now
     return profiles
@@ -2171,19 +2171,26 @@ def get_stock_universe():
 def build_earnings_data():
     """Build PEAD earnings intelligence data. Finviz (upcoming) + Finnhub (calendar) + yfinance (candles/quotes)."""
     if not FINNHUB_API_KEY:
-        print('[EARNINGS] Missing FINNHUB_API_KEY')
+        print('[EARNINGS] Missing FINNHUB_API_KEY', flush=True)
         return {'upcoming': [], 'signals': [], 'marketTrend': {}}
 
     today = datetime.date.today()
     today_str = today.isoformat()
 
     # --- Step 0: Stock universe for signals pre-filter (hardcoded, cached 7 days) ---
-    profiles = get_stock_universe()
-    valid_syms = set(profiles.keys())
-    print('[EARNINGS] Step 0: Universe = ' + str(len(valid_syms)) + ' stocks (used for signals only)')
+    profiles = {}
+    valid_syms = set()
+    try:
+        profiles = get_stock_universe()
+        valid_syms = set(profiles.keys())
+        print('[EARNINGS] Step 0 OK: Universe = ' + str(len(valid_syms)) + ' stocks', flush=True)
+    except Exception as e:
+        import traceback
+        print('[EARNINGS] Step 0 FAILED: ' + type(e).__name__ + ': ' + str(e), flush=True)
+        traceback.print_exc()
 
     # --- Step 1: Market trends (SPX + sector ETFs via yfinance, no FMP calls) ---
-    print('[EARNINGS] Step 1: Fetching market trends...')
+    print('[EARNINGS] Step 1: Fetching market trends...', flush=True)
     trend_symbols = ['^GSPC'] + list(set(SECTOR_ETF_MAP.values()))
     market_trend = {}
     for sym in trend_symbols:
@@ -2200,17 +2207,17 @@ def build_earnings_data():
                     'pctVsSma': round((current - sma10) / sma10 * 100, 2)
                 }
         except Exception as e:
-            print('[EARNINGS] trend ' + sym + ': ' + str(e))
-    print('[EARNINGS] Trends loaded: ' + str(len(market_trend)))
+            print('[EARNINGS] trend ' + sym + ': ' + str(e), flush=True)
+    print('[EARNINGS] Trends loaded: ' + str(len(market_trend)), flush=True)
 
     # --- Step 2: Upcoming earnings via Finviz screener (no FMP/Finnhub calls) ---
-    print('[EARNINGS] Step 2: Upcoming earnings (Finviz screener)...')
+    print('[EARNINGS] Step 2: Upcoming earnings (Finviz screener)...', flush=True)
     ck_upcoming = 'earnings_finviz_upcoming'
     now = datetime.datetime.now()
     CACHE_TTL_UPCOMING = 3600 * 2  # 2 hours for upcoming earnings
     if ck_upcoming in _cache and (now - _cache_time[ck_upcoming]).total_seconds() < CACHE_TTL_UPCOMING:
         upcoming = _cache[ck_upcoming]
-        print('[EARNINGS] Upcoming from cache: ' + str(len(upcoming)))
+        print('[EARNINGS] Upcoming from cache: ' + str(len(upcoming)), flush=True)
     else:
         # Finviz sector names → our SECTOR_ETF_MAP keys
         _FINVIZ_SECTOR_MAP = {
@@ -2247,13 +2254,13 @@ def build_earnings_data():
                             break
                         except Exception as fe:
                             if attempt == 0:
-                                print('[EARNINGS] Finviz ' + period + ' ' + exch + ' failed (' + str(fe) + '), retrying in 2s...')
+                                print('[EARNINGS] Finviz ' + period + ' ' + exch + ' failed (' + str(fe) + '), retrying in 2s...', flush=True)
                                 _time.sleep(2)
                             else:
-                                print('[EARNINGS] Finviz ' + period + ' ' + exch + ' retry failed: ' + str(fe))
+                                print('[EARNINGS] Finviz ' + period + ' ' + exch + ' retry failed: ' + str(fe), flush=True)
                     if df is not None and not df.empty:
                         _fvz_ok += 1
-                        print('[EARNINGS] Finviz ' + period + ' ' + exch + ': ' + str(len(df)) + ' stocks')
+                        print('[EARNINGS] Finviz ' + period + ' ' + exch + ': ' + str(len(df)) + ' stocks', flush=True)
                         for _, row in df.iterrows():
                             sym = str(row.get('Ticker', ''))
                             if not sym:
@@ -2292,10 +2299,10 @@ def build_earnings_data():
                             })
                     else:
                         _fvz_fail += 1
-                        print('[EARNINGS] Finviz ' + period + ' ' + exch + ': 0 stocks')
-            print('[EARNINGS] Finviz fetches: ' + str(_fvz_ok) + '/4 succeeded, ' + str(_fvz_fail) + '/4 empty/failed')
+                        print('[EARNINGS] Finviz ' + period + ' ' + exch + ': 0 stocks', flush=True)
+            print('[EARNINGS] Finviz fetches: ' + str(_fvz_ok) + '/4 succeeded, ' + str(_fvz_fail) + '/4 empty/failed', flush=True)
         except Exception as e:
-            print('[EARNINGS] Finviz screener error: ' + str(e))
+            print('[EARNINGS] Finviz screener error: ' + str(e), flush=True)
             import traceback; traceback.print_exc()
         # Deduplicate by symbol (keep first occurrence — "This Week" is scraped first, closer date wins)
         seen = set()
@@ -2322,12 +2329,12 @@ def build_earnings_data():
             if d:
                 u['date'] = d
                 matched += 1
-        print('[EARNINGS] Finnhub dates matched: ' + str(matched) + '/' + str(len(upcoming)))
+        print('[EARNINGS] Finnhub dates matched: ' + str(matched) + '/' + str(len(upcoming)), flush=True)
 
         # Fallback: yfinance for missing dates
         missing_date = [u for u in upcoming if not u.get('date')]
         if missing_date:
-            print('[EARNINGS] yfinance fallback for ' + str(len(missing_date)) + ' missing dates...')
+            print('[EARNINGS] yfinance fallback for ' + str(len(missing_date)) + ' missing dates...', flush=True)
             import yfinance as yf
             for u in missing_date:
                 try:
@@ -2341,7 +2348,7 @@ def build_earnings_data():
                                 ed = ed[0]
                             if hasattr(ed, 'strftime'):
                                 u['date'] = ed.strftime('%Y-%m-%d')
-                                print('[EARNINGS] yfinance date for ' + u['symbol'] + ': ' + u['date'])
+                                print('[EARNINGS] yfinance date for ' + u['symbol'] + ': ' + u['date'], flush=True)
                         elif hasattr(cal, 'columns'):
                             if 'Earnings Date' in cal.columns:
                                 vals = cal['Earnings Date'].dropna()
@@ -2349,19 +2356,19 @@ def build_earnings_data():
                                     ed = vals.iloc[0]
                                     if hasattr(ed, 'strftime'):
                                         u['date'] = ed.strftime('%Y-%m-%d')
-                                        print('[EARNINGS] yfinance date for ' + u['symbol'] + ': ' + u['date'])
+                                        print('[EARNINGS] yfinance date for ' + u['symbol'] + ': ' + u['date'], flush=True)
                 except Exception as e:
-                    print('[EARNINGS] yfinance date ' + u['symbol'] + ': ' + str(e))
+                    print('[EARNINGS] yfinance date ' + u['symbol'] + ': ' + str(e), flush=True)
 
         # Filter out stocks with dates more than 14 days from today (yfinance may return far-future dates)
         cutoff = (today + datetime.timedelta(days=14)).isoformat()
         before_filter = len(upcoming)
         upcoming = [u for u in upcoming if not u.get('date') or u['date'] <= cutoff]
         if before_filter != len(upcoming):
-            print('[EARNINGS] Filtered out ' + str(before_filter - len(upcoming)) + ' stocks with date beyond ' + cutoff)
+            print('[EARNINGS] Filtered out ' + str(before_filter - len(upcoming)) + ' stocks with date beyond ' + cutoff, flush=True)
 
         # Analyst ratings via yfinance (max 20 stocks, cached with upcoming)
-        print('[EARNINGS] Fetching analyst ratings (max 20)...')
+        print('[EARNINGS] Fetching analyst ratings (max 20)...', flush=True)
         import yfinance as yf
         rated = 0
         for u in upcoming[:20]:
@@ -2376,13 +2383,13 @@ def build_earnings_data():
                 u['analystRating'] = ''
                 u['targetPrice'] = None
                 u['numberOfAnalysts'] = None
-                print('[EARNINGS] analyst ' + u['symbol'] + ': ' + str(e))
+                print('[EARNINGS] analyst ' + u['symbol'] + ': ' + str(e), flush=True)
         # Fill defaults for stocks beyond top 20
         for u in upcoming[20:]:
             u['analystRating'] = ''
             u['targetPrice'] = None
             u['numberOfAnalysts'] = None
-        print('[EARNINGS] Analyst ratings fetched: ' + str(rated) + '/' + str(min(len(upcoming), 20)))
+        print('[EARNINGS] Analyst ratings fetched: ' + str(rated) + '/' + str(min(len(upcoming), 20)), flush=True)
 
         # Sort: date ascending (primary), market cap descending (secondary)
         upcoming.sort(key=lambda x: (x.get('date') or 'zzzz', -(x.get('marketCap') or 0)))
@@ -2391,18 +2398,18 @@ def build_earnings_data():
             _cache[ck_upcoming] = upcoming
             _cache_time[ck_upcoming] = now
         else:
-            print('[EARNINGS] Upcoming empty — NOT caching so next request retries')
-    print('[EARNINGS] Final upcoming: ' + str(len(upcoming)))
+            print('[EARNINGS] Upcoming empty — NOT caching so next request retries', flush=True)
+    print('[EARNINGS] Final upcoming: ' + str(len(upcoming)), flush=True)
 
     # --- Step 3: Recent earnings with positive surprise (Finnhub calendar → FMP profiles + candles) ---
-    print('[EARNINGS] Step 3: Recent earnings (Finnhub calendar)...')
+    print('[EARNINGS] Step 3: Recent earnings (Finnhub calendar)...', flush=True)
     recent_from = (today - datetime.timedelta(days=30)).isoformat()
-    print('[EARNINGS] Recent from=' + recent_from + ' to=' + today_str)
+    print('[EARNINGS] Recent from=' + recent_from + ' to=' + today_str, flush=True)
     recent_cal = fetch_finnhub('calendar/earnings?from=' + recent_from + '&to=' + today_str)
     raw_recent = recent_cal.get('earningsCalendar', []) if isinstance(recent_cal, dict) else []
-    print('[EARNINGS] Finnhub raw recent: ' + str(len(raw_recent)))
+    print('[EARNINGS] Finnhub raw recent: ' + str(len(raw_recent)), flush=True)
     if raw_recent:
-        print('[EARNINGS] Sample recent item: ' + str(raw_recent[0])[:200])
+        print('[EARNINGS] Sample recent item: ' + str(raw_recent[0])[:200], flush=True)
 
     # Filter: positive surprise — no universe gate; market cap filter downstream ($10B-$200B) ensures quality
     surprise_candidates = []
@@ -2427,10 +2434,10 @@ def build_earnings_data():
             continue
         surprise_candidates.append(item)
     surprise_candidates.sort(key=lambda x: abs(float(x.get('epsEstimate') or 0)), reverse=True)
-    print('[EARNINGS] Positive surprises (all symbols): ' + str(len(surprise_candidates)))
+    print('[EARNINGS] Positive surprises (all symbols): ' + str(len(surprise_candidates)), flush=True)
     # Cap candidates to avoid OOM on free tier — top 100 by EPS estimate magnitude covers all $10B+ stocks
     if len(surprise_candidates) > 100:
-        print('[EARNINGS] Capping candidates from ' + str(len(surprise_candidates)) + ' to 100')
+        print('[EARNINGS] Capping candidates from ' + str(len(surprise_candidates)) + ' to 100', flush=True)
         surprise_candidates = surprise_candidates[:100]
 
     # For each surprise candidate: use universe data (no FMP profile call) + OHLC candles
@@ -2458,7 +2465,7 @@ def build_earnings_data():
                 _cache[ck_fvz] = fvz_data
                 _cache_time[ck_fvz] = now_fvz
             except Exception as e:
-                print('[EARNINGS] Finviz quote ' + sym + ': ' + str(e))
+                print('[EARNINGS] Finviz quote ' + sym + ': ' + str(e), flush=True)
                 fvz_data = {}
                 _cache[ck_fvz] = fvz_data
                 _cache_time[ck_fvz] = now_fvz
@@ -2508,7 +2515,7 @@ def build_earnings_data():
                 continue
             _dbg['candle_ok'] += 1
         except Exception as e:
-            print('[EARNINGS] yfinance candle ' + sym + ': ' + str(e))
+            print('[EARNINGS] yfinance candle ' + sym + ': ' + str(e), flush=True)
             continue
 
         # Build date-indexed arrays from DataFrame
@@ -2596,7 +2603,7 @@ def build_earnings_data():
         # Debug: log first 5 candidates before invalidation
         _sig_debug += 1
         if _sig_debug <= 5:
-            print('[EARNINGS] Signal check ' + sym + ': price=' + str(round(current_price, 2)) + ' eLow=' + str(round(earnings_low, 2)) + ' preClose=' + str(round(pre_close, 2)) + ' drift=' + str(drift_pct) + ' gap=' + str(gap_pct) + ' entry=' + str(round(earnings_high, 2)) + ' days=' + str(days_since))
+            print('[EARNINGS] Signal check ' + sym + ': price=' + str(round(current_price, 2)) + ' eLow=' + str(round(earnings_low, 2)) + ' preClose=' + str(round(pre_close, 2)) + ' drift=' + str(drift_pct) + ' gap=' + str(gap_pct) + ' entry=' + str(round(earnings_high, 2)) + ' days=' + str(days_since), flush=True)
 
         # After 30 days → remove from list (not shown, not marked expired)
         if days_since >= 30:
@@ -2672,18 +2679,18 @@ def build_earnings_data():
                             sig['driftPct'] = round((cp - ec) / ec * 100, 2)
                         sig['gapFilled'] = cp < sig['preClose']
                         sig['isActive'] = sig['daysSinceEarnings'] < 30 and cp >= sig['earningsLow']
-                print('[EARNINGS] yfinance batch quote updated ' + str(len(price_map)) + ' signals')
+                print('[EARNINGS] yfinance batch quote updated ' + str(len(price_map)) + ' signals', flush=True)
         except Exception as e:
-            print('[EARNINGS] yfinance batch quote error: ' + str(e))
+            print('[EARNINGS] yfinance batch quote error: ' + str(e), flush=True)
 
     # Remove signals invalidated by live prices (only: price < earnings candle low)
     before_count = len(signals)
     signals = [s for s in signals if s['currentPrice'] >= s['earningsLow']]
     if len(signals) < before_count:
-        print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated after live price update (price < earningsLow)')
+        print('[EARNINGS] Removed ' + str(before_count - len(signals)) + ' invalidated after live price update (price < earningsLow)', flush=True)
 
     # --- Step 5: Analyst ratings for signals (yfinance, max 20) ---
-    print('[EARNINGS] Step 5: Analyst ratings for signals...')
+    print('[EARNINGS] Step 5: Analyst ratings for signals...', flush=True)
     sig_rated = 0
     for sig in signals[:20]:
         try:
@@ -2698,12 +2705,12 @@ def build_earnings_data():
             sig['analystRating'] = ''
             sig['targetPrice'] = None
             sig['numberOfAnalysts'] = None
-            print('[EARNINGS] analyst sig ' + sig['symbol'] + ': ' + str(e))
+            print('[EARNINGS] analyst sig ' + sig['symbol'] + ': ' + str(e), flush=True)
     for sig in signals[20:]:
         sig['analystRating'] = ''
         sig['targetPrice'] = None
         sig['numberOfAnalysts'] = None
-    print('[EARNINGS] Signal analyst ratings: ' + str(sig_rated) + '/' + str(min(len(signals), 20)))
+    print('[EARNINGS] Signal analyst ratings: ' + str(sig_rated) + '/' + str(min(len(signals), 20)), flush=True)
 
     return {
         'upcoming': upcoming,
@@ -2732,7 +2739,7 @@ def api_earnings():
         _threading.Thread(target=_refresh_pead_cache, daemon=True).start()
         return jsonify(_cache[ck])
     except Exception as e:
-        print('[EARNINGS] ' + str(e))
+        print('[EARNINGS] ' + str(e), flush=True)
         import traceback; traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -2742,7 +2749,7 @@ def api_earnings_refresh():
     for k in keys:
         _cache.pop(k, None)
         _cache_time.pop(k, None)
-    print('[EARNINGS] Cache cleared (' + str(len(keys)) + ' keys)')
+    print('[EARNINGS] Cache cleared (' + str(len(keys)) + ' keys)', flush=True)
     return api_earnings()
 
 @app.route('/api/earnings/history')
@@ -2866,14 +2873,14 @@ def api_earnings_history():
                         q['driftPct'] = drift_pct
                         q['driftLabel'] = e_label + ' \u2192 ' + d_label
                 except Exception as e:
-                    print('[EARNINGS] drift calc ' + sym + ': ' + str(e))
+                    print('[EARNINGS] drift calc ' + sym + ': ' + str(e), flush=True)
 
         result = {'status': 'ok', 'symbol': sym, 'quarters': quarters}
         _cache[ck] = result
         _cache_time[ck] = now
         return jsonify(result)
     except Exception as e:
-        print('[EARNINGS] history ' + sym + ': ' + str(e))
+        print('[EARNINGS] history ' + sym + ': ' + str(e), flush=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
@@ -4053,9 +4060,11 @@ def _refresh_pead_cache():
         result.update(data)
         _cache['earnings_main'] = result
         _cache_time['earnings_main'] = datetime.datetime.now()
-        print('[PEAD-BG] Cache refreshed: ' + str(len(data.get('signals', []))) + ' signals, ' + str(len(data.get('upcoming', []))) + ' upcoming')
+        print('[PEAD-BG] Cache refreshed: ' + str(len(data.get('signals', []))) + ' signals, ' + str(len(data.get('upcoming', []))) + ' upcoming', flush=True)
     except Exception as e:
-        print('[PEAD-BG] Refresh error: ' + str(e))
+        import traceback
+        print('[PEAD-BG] CRASH: ' + type(e).__name__ + ': ' + str(e), flush=True)
+        traceback.print_exc()
 
 
 def _pead_refresh_loop():
@@ -4063,10 +4072,12 @@ def _pead_refresh_loop():
     _time.sleep(300)  # 5min initial delay: let server settle before first heavy compute
     while True:
         try:
-            print('[PEAD-BG] Starting refresh...')
+            print('[PEAD-BG] Starting refresh...', flush=True)
             _refresh_pead_cache()
         except Exception as e:
-            print('[PEAD-BG] Loop error: ' + str(e))
+            import traceback
+            print('[PEAD-BG] Loop CRASH: ' + type(e).__name__ + ': ' + str(e), flush=True)
+            traceback.print_exc()
         _time.sleep(_PEAD_REFRESH_INTERVAL)
 
 
