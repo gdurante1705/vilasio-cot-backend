@@ -8,6 +8,23 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
+import threading as _threading
+_pead_started = False
+_pead_start_lock = _threading.Lock()
+
+@app.before_request
+def _ensure_pead_thread():
+    global _pead_started
+    if _pead_started:
+        return
+    with _pead_start_lock:
+        if _pead_started:
+            return
+        _pead_started = True
+        import os
+        print('[PEAD-BG] Starting thread in worker PID=' + str(os.getpid()), flush=True)
+        _threading.Thread(target=_pead_refresh_loop, daemon=True).start()
+
 @app.after_request
 def add_cors(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -4069,7 +4086,7 @@ def _refresh_pead_cache():
 
 def _pead_refresh_loop():
     """Refresh PEAD scanner every 6 hours. Sleeps between cycles — negligible RAM."""
-    _time.sleep(300)  # 5min initial delay: let server settle before first heavy compute
+    _time.sleep(60)  # 60s initial delay (reduced from 300): first user doesn't wait 5 min
     while True:
         try:
             print('[PEAD-BG] Starting refresh...', flush=True)
@@ -4081,7 +4098,7 @@ def _pead_refresh_loop():
         _time.sleep(_PEAD_REFRESH_INTERVAL)
 
 
-_threading.Thread(target=_pead_refresh_loop, daemon=True).start()
+# Thread now started lazily via @app.before_request (_ensure_pead_thread)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
